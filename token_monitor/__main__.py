@@ -68,8 +68,13 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     print(f"{symbol} {token}: {len(parsed)} pools\n")
 
     # Риск-оценка Codex — предпросмотр, полноценный security (GMGN) будет на этапе 3
-    risks = {(r.get("riskVerdict"), r.get("riskScore"), tuple(r.get("riskReasons") or ())) for r, _ in parsed}
-    for verdict, score, reasons in sorted(risks, key=str):
+    risks = {(r.get("riskCoverage"), r.get("riskVerdict"), r.get("riskScore"), tuple(r.get("riskReasons") or ()))
+             for r, _ in parsed}
+    for coverage, verdict, score, reasons in sorted(risks, key=str):
+        if coverage != "ANALYZED":
+            # NEUTRAL без анализа ≠ «чисто»
+            print(f"codex risk: not analyzed ({coverage or 'n/a'})")
+            continue
         print(f"codex risk: {verdict or 'n/a'} score={score if score is not None else 'n/a'} "
               f"{', '.join(reasons) or '-'}")
     print()

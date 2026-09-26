@@ -27,6 +27,10 @@ class PoolSnapshot:
     vol_24h_usd: float
     symbol: str = ""
     exchange: str = ""
+    # Качество активности за 24ч (None = индексатор не вернул)
+    txns_24h: int | None = None
+    unique_wallets_24h: int | None = None
+    fresh_wallet_share: float | None = None   # доля свопов с кошельков моложе суток
 
 
 @dataclass(frozen=True, slots=True)

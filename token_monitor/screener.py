@@ -33,6 +33,10 @@ query Screen($filters: PairFilters, $rankings: [PairRanking], $limit: Int) {
       volumeUSD1
       volumeUSD24
       poolFeeBps
+      txnCount24
+      uniqueTransactions24
+      swapPct1dOldWallet
+      riskCoverage
       riskVerdict
       riskScore
       riskReasons
@@ -91,6 +95,11 @@ def _num(v: Any) -> float | None:
         return None
 
 
+def _int(v: Any) -> int | None:
+    n = _num(v)
+    return int(n) if n is not None else None
+
+
 def parse_pair(row: dict[str, Any], target: str | None = None) -> PoolSnapshot | None:
     """None для строк, по которым нельзя посчитать доходность (нет комиссии, чужая сеть и т.п.).
 
@@ -117,6 +126,9 @@ def parse_pair(row: dict[str, Any], target: str | None = None) -> PoolSnapshot |
         vol_24h_usd=_num(row.get("volumeUSD24")) or 0.0,
         symbol=(row.get(side) or {}).get("symbol") or "",
         exchange=(row.get("exchange") or {}).get("name") or "",
+        txns_24h=_int(row.get("txnCount24")),
+        unique_wallets_24h=_int(row.get("uniqueTransactions24")),
+        fresh_wallet_share=_num(row.get("swapPct1dOldWallet")),
     )
 
 

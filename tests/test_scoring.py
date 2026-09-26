@@ -4,7 +4,7 @@ from math import isclose, sqrt
 import pytest
 
 from token_monitor.models import Network, PoolSnapshot, SecurityInfo, Verdict
-from token_monitor.scoring import Params, classify_market, daily_yield, security_flags, stress_loss
+from token_monitor.scoring import Params, activity_flags, classify_market, daily_yield, security_flags, stress_loss
 
 
 def pool(**kw) -> PoolSnapshot:
@@ -78,3 +78,33 @@ def test_security_red_flags(field, value, expected):
 def test_unknown_security_fields():
     assert "honeypot unknown" in security_flags(SecurityInfo())
     assert security_flags(SecurityInfo(), Params(strict_unknown=False)) == []
+
+
+# SLOW-пул из test_stable_volume_is_slow с органической активностью
+ORGANIC = dict(vol_1h_usd=10_000, vol_24h_usd=240_000, txns_24h=2_000, unique_wallets_24h=500,
+               fresh_wallet_share=0.05)
+
+
+def test_organic_activity_keeps_verdict():
+    assert classify_market(pool(**ORGANIC)).verdict is Verdict.SLOW
+
+
+@pytest.mark.parametrize("override,reason", [
+    # Реальный кейс: $32M объёма за 15 сделок в пуле на $1.1M
+    ({"txns_24h": 15}, "avg trade 16% of pool"),
+    ({"unique_wallets_24h": 10}, "only 10 wallets/24h"),
+    ({"fresh_wallet_share": 0.99}, "99% swaps from <1d wallets"),
+])
+def test_wash_volume_is_skipped(override, reason):
+    r = classify_market(pool(**{**ORGANIC, **override}))
+    assert r.verdict is Verdict.SKIP
+    assert r.reasons[0].startswith("wash:") and reason in r.reasons[0]
+    assert r.metrics["breakeven_days"] < 7          # математика посчитана, отсекло именно качество объёма
+
+
+def test_missing_activity_data_is_not_flagged():
+    assert activity_flags(pool(vol_24h_usd=240_000)) == []
+
+
+def test_dead_pool_is_not_flagged_for_few_wallets():
+    assert activity_flags(pool(unique_wallets_24h=0)) == []

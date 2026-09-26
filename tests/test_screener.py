@@ -153,7 +153,7 @@ def test_analyze_cli(monkeypatch, capsys):
 
     def fake_fetch_rows(self, query):
         assert query.tokens == ("0xtoken",) and not query.exclude_scam
-        return [{**row(), "riskVerdict": "CAUTION", "riskScore": 0.4, "riskReasons": ["TAX_SELL_HIGH"]}]
+        return [{**row(), "riskCoverage": "ANALYZED", "riskVerdict": "CAUTION", "riskScore": 0.4, "riskReasons": ["TAX_SELL_HIGH"]}]
 
     monkeypatch.setenv("CODEX_API_KEY", "k")
     monkeypatch.setattr(CodexScreener, "fetch_rows", fake_fetch_rows)
@@ -162,3 +162,19 @@ def test_analyze_cli(monkeypatch, capsys):
     assert "CAKE 0xtoken: 1 pools" in out
     assert "CAUTION" in out and "TAX_SELL_HIGH" in out
     assert "SLOW" in out
+
+
+def test_parse_activity_fields():
+    p = parse_pair(row(txnCount24=15, uniqueTransactions24="10", swapPct1dOldWallet="0.07"))
+    assert (p.txns_24h, p.unique_wallets_24h, p.fresh_wallet_share) == (15, 10, 0.07)
+
+
+def test_analyze_marks_unanalyzed_risk(monkeypatch, capsys):
+    from token_monitor import __main__ as cli
+
+    monkeypatch.setenv("CODEX_API_KEY", "k")
+    monkeypatch.setattr(CodexScreener, "fetch_rows",
+                        lambda self, q: [{**row(), "riskCoverage": "NOT_ANALYZED", "riskVerdict": "NEUTRAL"}])
+    assert cli.main(["analyze", "0xTOKEN"]) == 0
+    out = capsys.readouterr().out
+    assert "not analyzed (NOT_ANALYZED)" in out and "NEUTRAL" not in out
