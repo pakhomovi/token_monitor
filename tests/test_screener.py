@@ -135,3 +135,30 @@ def test_screen_orders_fast_then_slow_and_drops_skip():
     out = screen([slow, dead, fast])
     assert [s.market.verdict for s in out] == [Verdict.FAST, Verdict.SLOW]
     assert len(screen([slow, dead, fast], keep_skipped=True)) == 3
+
+
+def test_query_token_filter():
+    v = ScreenerQuery(networks=(Network.BSC,), tokens=("0xabc",)).variables()
+    assert v["filters"]["tokenAddress"] == ["0xabc"]
+
+
+def test_parse_target_overrides_quote_side():
+    # Анализируем WBNB, хотя по quoteToken целевым был бы token0
+    assert parse_pair(row(), target="0xWBNB").token == "0xwbnb"
+    assert parse_pair(row(), target="0xOTHER").token == "0xtoken"   # чужой адрес → обычная логика
+
+
+def test_analyze_cli(monkeypatch, capsys):
+    from token_monitor import __main__ as cli
+
+    def fake_fetch_rows(self, query):
+        assert query.tokens == ("0xtoken",) and not query.exclude_scam
+        return [{**row(), "riskVerdict": "CAUTION", "riskScore": 0.4, "riskReasons": ["TAX_SELL_HIGH"]}]
+
+    monkeypatch.setenv("CODEX_API_KEY", "k")
+    monkeypatch.setattr(CodexScreener, "fetch_rows", fake_fetch_rows)
+    assert cli.main(["analyze", "0xTOKEN", "--network", "bsc"]) == 0
+    out = capsys.readouterr().out
+    assert "CAKE 0xtoken: 1 pools" in out
+    assert "CAUTION" in out and "TAX_SELL_HIGH" in out
+    assert "SLOW" in out

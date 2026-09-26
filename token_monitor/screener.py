@@ -33,6 +33,9 @@ query Screen($filters: PairFilters, $rankings: [PairRanking], $limit: Int) {
       volumeUSD1
       volumeUSD24
       poolFeeBps
+      riskVerdict
+      riskScore
+      riskReasons
     }
   }
 }
@@ -52,6 +55,7 @@ class ScreenerQuery:
     min_fee_bps: float = 0           # отсекает 1bp стейбл/мажор-пулы, забивающие top-N
     rank_by: str = "volumeUSD24"
     exclude_scam: bool = True        # бесплатный пре-фильтр Codex, полноценный security — этап 3
+    tokens: tuple[str, ...] = ()     # анализ конкретных токенов вместо общего скрининга
 
     def __post_init__(self) -> None:
         if not 1 <= self.limit <= 200:
@@ -70,6 +74,8 @@ class ScreenerQuery:
             filters["poolFeeBps"] = {"gte": self.min_fee_bps}
         if self.exclude_scam:
             filters["potentialScam"] = False
+        if self.tokens:
+            filters["tokenAddress"] = list(self.tokens)
         return {
             "filters": filters,
             "rankings": [{"attribute": self.rank_by, "direction": "DESC"}],
@@ -85,8 +91,11 @@ def _num(v: Any) -> float | None:
         return None
 
 
-def parse_pair(row: dict[str, Any]) -> PoolSnapshot | None:
-    """None для строк, по которым нельзя посчитать доходность (нет комиссии, чужая сеть и т.п.)."""
+def parse_pair(row: dict[str, Any], target: str | None = None) -> PoolSnapshot | None:
+    """None для строк, по которым нельзя посчитать доходность (нет комиссии, чужая сеть и т.п.).
+
+    target: адрес анализируемого токена — перекрывает выбор по quoteToken.
+    """
     pair = row.get("pair") or {}
     network = _NETWORK_BY_ID.get(pair.get("networkId"))
     fee = _num(row.get("poolFeeBps"))
@@ -96,6 +105,8 @@ def parse_pair(row: dict[str, Any]) -> PoolSnapshot | None:
 
     # Целевой токен — не quote-сторона пары (WBNB/USDT/WETH)
     side = "token0" if row.get("quoteToken") == "token1" else "token1"
+    if target and target.lower() in (str(pair.get("token0")).lower(), str(pair.get("token1")).lower()):
+        side = "token0" if str(pair["token0"]).lower() == target.lower() else "token1"
     return PoolSnapshot(
         address=pair["address"].lower(),
         token=pair[side].lower(),
@@ -131,10 +142,13 @@ class CodexScreener:
     def close(self) -> None:
         self._client.close()
 
-    def fetch(self, query: ScreenerQuery) -> list[PoolSnapshot]:
+    def fetch_rows(self, query: ScreenerQuery) -> list[dict[str, Any]]:
         data = self._request({"query": QUERY, "variables": query.variables()})
-        rows = (data.get("filterPairs") or {}).get("results") or []
-        pools = [p for row in rows if row and (p := parse_pair(row))]
+        return [r for r in (data.get("filterPairs") or {}).get("results") or [] if r]
+
+    def fetch(self, query: ScreenerQuery) -> list[PoolSnapshot]:
+        rows = self.fetch_rows(query)
+        pools = [p for row in rows if (p := parse_pair(row))]
         if len(pools) < len(rows):
             log.info("screener: dropped %d of %d rows without fee/liquidity", len(rows) - len(pools), len(rows))
         return pools

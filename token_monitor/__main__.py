@@ -3,8 +3,9 @@ import logging
 import sys
 
 from .config import load_settings
+from .models import Network
 from .pipeline import Scored, screen
-from .screener import CodexError, CodexScreener, ScreenerQuery
+from .screener import CodexError, CodexScreener, ScreenerQuery, parse_pair
 
 
 def _row(s: Scored) -> str:
@@ -40,6 +41,45 @@ def cmd_screen(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_analyze(args: argparse.Namespace) -> int:
+    st = load_settings()
+    token = args.token.lower()
+    query = ScreenerQuery(
+        networks=(Network(args.network),) if args.network else st.networks,
+        limit=50,
+        min_liquidity=args.min_liq,
+        rank_by="liquidity",
+        exclude_scam=False,          # для конкретного токена хотим видеть и флаги Codex
+        tokens=(token,),
+    )
+    try:
+        with CodexScreener(st.codex_api_key or "") as screener:
+            rows = screener.fetch_rows(query)
+    except CodexError as e:
+        print(f"codex: {e}", file=sys.stderr)
+        return 1
+
+    parsed = [(r, p) for r in rows if (p := parse_pair(r, target=token)) and p.token == token]
+    if not parsed:
+        print(f"no pools for {token} with liquidity >= ${args.min_liq:,.0f}", file=sys.stderr)
+        return 1
+
+    symbol = next((p.symbol for _, p in parsed if p.symbol), "?")
+    print(f"{symbol} {token}: {len(parsed)} pools\n")
+
+    # Риск-оценка Codex — предпросмотр, полноценный security (GMGN) будет на этапе 3
+    risks = {(r.get("riskVerdict"), r.get("riskScore"), tuple(r.get("riskReasons") or ())) for r, _ in parsed}
+    for verdict, score, reasons in sorted(risks, key=str):
+        print(f"codex risk: {verdict or 'n/a'} score={score if score is not None else 'n/a'} "
+              f"{', '.join(reasons) or '-'}")
+    print()
+
+    results = screen([p for _, p in parsed], st.params, keep_skipped=True)
+    for s in results:
+        print(_row(s))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="token_monitor")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -48,6 +88,11 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("--limit", type=int, help="override SCREEN_LIMIT")
     sc.add_argument("--all", action="store_true", help="показывать и SKIP")
     sc.set_defaults(func=cmd_screen)
+    an = sub.add_parser("analyze", help="все пулы токена → FAST/SLOW/SKIP + риск Codex")
+    an.add_argument("token", help="адрес токена")
+    an.add_argument("--network", choices=[n.value for n in Network])
+    an.add_argument("--min-liq", type=float, default=1_000, help="нижняя граница ликвидности пула, $")
+    an.set_defaults(func=cmd_analyze)
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)

@@ -32,6 +32,7 @@
 ```bash
 python -m token_monitor screen            # FAST/SLOW, отсортировано по скорости окупаемости
 python -m token_monitor screen --all      # вместе со SKIP
+python -m token_monitor analyze 0x…      # все пулы токена + риск-оценка Codex
 ```
 
 Screener берёт `CODEX_API_KEY`, `SCREEN_LIMIT` (≤ 200), `SCREEN_RANK_BY`,
