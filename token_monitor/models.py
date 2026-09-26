@@ -25,6 +25,8 @@ class PoolSnapshot:
     liquidity_usd: float    # v2: TVL; v3/v4: активная ликвидность около текущей цены
     vol_1h_usd: float
     vol_24h_usd: float
+    symbol: str = ""
+    exchange: str = ""
 
 
 @dataclass(frozen=True, slots=True)

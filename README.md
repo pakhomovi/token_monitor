@@ -4,7 +4,7 @@
 
 ## Воронка
 
-1. **Screener**: один запрос к индексатору → top-N пулов *(этап 2)*
+1. **Screener** (Codex `filterPairs`): один запрос → top-N пулов по всем сетям
 2. **`classify_market`**: математика, 0 запросов → FAST / SLOW / SKIP
 3. **Security** (GMGN) → `security_flags` *(этап 3)*
 4. **Ручное подтверждение** в Telegram *(этап 4)*
@@ -26,6 +26,17 @@
 
 `pending → approved → collected → researched`, либо `pending → rejected`.
 Переходы атомарные: повторное нажатие кнопки или гонка процессов не ломает состояние.
+
+## Запуск
+
+```bash
+python -m token_monitor screen            # FAST/SLOW, отсортировано по скорости окупаемости
+python -m token_monitor screen --all      # вместе со SKIP
+```
+
+Screener берёт `CODEX_API_KEY`, `SCREEN_LIMIT` (≤ 200), `SCREEN_RANK_BY`,
+`SCREEN_MIN_VOLUME_24H`, `SCREEN_MIN_FEE_BPS`; порог ликвидности — общий `PARAM_MIN_LIQUIDITY`,
+фильтруется на стороне Codex. Пулы без `poolFeeBps` отбрасываются.
 
 ## Разработка
 

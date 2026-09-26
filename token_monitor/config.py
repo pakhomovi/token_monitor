@@ -14,6 +14,11 @@ class Settings:
     db_path: str
     cooldown_hours: float
     params: Params
+    codex_api_key: str | None
+    screen_limit: int
+    screen_rank_by: str
+    screen_min_volume_24h: float
+    screen_min_fee_bps: float
     telegram_token: str | None
     telegram_chat_id: str | None
     ollama_url: str
@@ -49,6 +54,11 @@ def load_settings(env_file: str | Path | None = ".env") -> Settings:
         db_path=env.get("DB_PATH", "candidates.db"),
         cooldown_hours=float(env.get("COOLDOWN_HOURS", "24")),
         params=load_params(env),
+        codex_api_key=env.get("CODEX_API_KEY") or None,
+        screen_limit=int(env.get("SCREEN_LIMIT", "50")),
+        screen_rank_by=env.get("SCREEN_RANK_BY", "volumeUSD24"),
+        screen_min_volume_24h=float(env.get("SCREEN_MIN_VOLUME_24H", "0")),
+        screen_min_fee_bps=float(env.get("SCREEN_MIN_FEE_BPS", "10")),
         telegram_token=env.get("TELEGRAM_BOT_TOKEN") or None,
         telegram_chat_id=env.get("TELEGRAM_CHAT_ID") or None,
         ollama_url=env.get("OLLAMA_URL", "http://localhost:11434").rstrip("/"),
