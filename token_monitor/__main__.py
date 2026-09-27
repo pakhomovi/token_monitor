@@ -9,7 +9,7 @@ from .models import Network, PoolSnapshot
 from .pipeline import Scored, screen
 from .scoring import Params, RangeStress, min_fee_for, stress_model
 from .screener import CodexError, CodexScreener, ScreenerQuery, parse_pair
-from .onchain import ChainReader, parse_position_url
+from .onchain import NATIVE, ChainReader, parse_position_url
 from .positions import PositionView
 from .strategy import RangePosition, Shape
 
@@ -144,11 +144,13 @@ def _num(x: float) -> str:
 
 
 def _position_report(v: PositionView, usd: float | None, vol24: float | None,
-                     minted: int | None = None, usd_at_entry: float | None = None) -> str:
+                     minted: int | None = None, usd_at_entry: float | None = None,
+                     quote_usd: float | None = None) -> str:
     p, t, q = v.pos, v.target, v.quote
     lo, hi = v.range
     where = ("выше диапазона" if v.from_top > 0 else "ниже диапазона" if not p.in_range else "в диапазоне")
-    q_usd = usd / v.price if usd else None                  # цена quote в $ через цену токена
+    # Прямая цена quote точнее; через цену токена — только для нативного ETH без адреса
+    q_usd = quote_usd or (usd / v.price if usd else None)
 
     def money(amount_q: float) -> str:
         return f"{_num(amount_q)} {q.symbol}" + (f" (${amount_q * q_usd:,.2f})" if q_usd else "")
@@ -207,7 +209,8 @@ def cmd_position(args: argparse.Namespace) -> int:
     if st.codex_api_key:
         try:
             with CodexScreener(st.codex_api_key) as codex:
-                usd = codex.token_prices([(v.target.address, v.pos.network) for v in views])
+                usd = codex.token_prices([(t.address, v.pos.network) for v in views for t in (v.target, v.quote)
+                                          if t.address != NATIVE])
                 entry_usd = {
                     (v.pos.network, v.pos.token_id): codex.token_prices(
                         [(v.target.address, v.pos.network)], timestamp=ts).get(v.target.address.lower())
@@ -221,7 +224,7 @@ def cmd_position(args: argparse.Namespace) -> int:
     for v in views:
         key = (v.pos.network, v.pos.token_id)
         print(_position_report(v, usd.get(v.target.address.lower()), vols.get(v.pos.pool.lower()),
-                               minted.get(key), entry_usd.get(key)), end="\n\n")
+                               minted.get(key), entry_usd.get(key), usd.get(v.quote.address.lower())), end="\n\n")
     return 0
 
 
