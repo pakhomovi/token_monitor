@@ -53,10 +53,11 @@ def activity_flags(p: PoolSnapshot, cfg: Params = Params()) -> list[str]:
 
 
 def classify_market(p: PoolSnapshot, cfg: Params = Params()) -> MarketResult:
-    """Этап 2 воронки: только рыночная математика, без сетевых запросов."""
-    if p.liquidity_usd < cfg.min_liquidity:
-        return MarketResult(Verdict.SKIP, [f"liquidity < ${cfg.min_liquidity:,.0f}"])
+    """Этап 2 воронки: только рыночная математика, без сетевых запросов.
 
+    Метрики считаются всегда, даже для отсеянных пулов, чтобы при ручном анализе было видно,
+    что именно отсекло пул.
+    """
     loss = stress_loss(cfg.stress_drop)
     y_24h = daily_yield(p.fee_bps, p.vol_24h_usd, p.liquidity_usd)
     y_now = daily_yield(p.fee_bps, p.vol_1h_usd * 24, p.liquidity_usd)
@@ -74,21 +75,21 @@ def classify_market(p: PoolSnapshot, cfg: Params = Params()) -> MarketResult:
         "breakeven_hours_now": be_hours_now,
     }
 
-    if wash := activity_flags(p, cfg):
-        return MarketResult(Verdict.SKIP, [f"wash: {'; '.join(wash)}"], metrics)
-
     stable = cfg.min_persistence <= persistence <= cfg.max_persistence
     if stable and be_days <= cfg.slow_horizon_days:
-        return MarketResult(
-            Verdict.SLOW,
-            [f"breakeven {be_days:.1f}d, persistence {persistence:.2f}"],
-            metrics,
-        )
-    if be_hours_now <= cfg.fast_horizon_hours:
-        return MarketResult(Verdict.FAST, [f"hot now: breakeven {be_hours_now:.1f}h"], metrics)
-    return MarketResult(
-        Verdict.SKIP, [f"fees don't cover -{cfg.stress_drop:.0%} within horizon"], metrics
-    )
+        verdict, reason = Verdict.SLOW, f"breakeven {be_days:.1f}d, persistence {persistence:.2f}"
+    elif be_hours_now <= cfg.fast_horizon_hours:
+        verdict, reason = Verdict.FAST, f"hot now: breakeven {be_hours_now:.1f}h"
+    else:
+        return MarketResult(Verdict.SKIP, [f"fees don't cover -{cfg.stress_drop:.0%} within horizon"], metrics)
+
+    # Гейты применяются только к пулам, прошедшим математику: мёртвый пул — не wash
+    if p.liquidity_usd < cfg.min_liquidity:
+        return MarketResult(Verdict.SKIP, [f"liquidity < ${cfg.min_liquidity:,.0f}",
+                                           f"else {verdict.value.upper()}: {reason}"], metrics)
+    if wash := activity_flags(p, cfg):
+        return MarketResult(Verdict.SKIP, [f"wash: {'; '.join(wash)}"], metrics)
+    return MarketResult(verdict, [reason], metrics)
 
 
 def security_flags(s: SecurityInfo, cfg: Params = Params()) -> list[str]:

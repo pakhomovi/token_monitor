@@ -79,9 +79,19 @@ def cmd_analyze(args: argparse.Namespace) -> int:
               f"{', '.join(reasons) or '-'}")
     print()
 
-    results = screen([p for _, p in parsed], st.params, keep_skipped=True)
-    for s in results:
+    # Для ручного анализа важнее, где лежит ликвидность, чем порядок по вердикту
+    results = sorted(screen([p for _, p in parsed], st.params, keep_skipped=True),
+                     key=lambda s: -s.pool.liquidity_usd)
+    shown, hidden = results[:args.top], results[args.top:]
+    for s in shown:
         print(_row(s))
+    if hidden:
+        print(f"... +{len(hidden)} pools: liq ${sum(s.pool.liquidity_usd for s in hidden):,.0f}, "
+              f"vol24 ${sum(s.pool.vol_24h_usd for s in hidden):,.0f} (--top {len(results)} to show)")
+    total_liq = sum(s.pool.liquidity_usd for s in results)
+    total_vol = sum(s.pool.vol_24h_usd for s in results)
+    print(f"\ntotal: liq ${total_liq:,.0f}, vol24 ${total_vol:,.0f}, "
+          f"top pool holds {results[0].pool.liquidity_usd / total_liq:.0%} of liquidity" if total_liq else "")
     return 0
 
 
@@ -97,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     an.add_argument("token", help="адрес токена")
     an.add_argument("--network", choices=[n.value for n in Network])
     an.add_argument("--min-liq", type=float, default=1_000, help="нижняя граница ликвидности пула, $")
+    an.add_argument("--top", type=int, default=10, help="сколько пулов показать (по ликвидности)")
     an.set_defaults(func=cmd_analyze)
 
     args = ap.parse_args(argv)

@@ -108,3 +108,16 @@ def test_missing_activity_data_is_not_flagged():
 
 def test_dead_pool_is_not_flagged_for_few_wallets():
     assert activity_flags(pool(unique_wallets_24h=0)) == []
+
+
+def test_low_liquidity_still_reports_metrics_and_would_be_verdict():
+    # Кейс HADES: $21k ликвидности, 6% fee — математика проходит, отсекает только порог
+    r = classify_market(pool(liquidity_usd=21_314, fee_bps=600, vol_1h_usd=1_817, vol_24h_usd=48_463))
+    assert r.verdict is Verdict.SKIP
+    assert r.reasons[0].startswith("liquidity <") and r.reasons[1].startswith("else SLOW")
+    assert isclose(r.metrics["daily_yield_24h"], 0.06 * 48_463 / 21_314)
+
+
+def test_dead_pool_with_few_wallets_is_not_wash():
+    r = classify_market(pool(vol_24h_usd=5, unique_wallets_24h=7))
+    assert not r.reasons[0].startswith("wash")
