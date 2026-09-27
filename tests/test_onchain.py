@@ -177,3 +177,11 @@ def test_minted_at_without_archive_and_logs_fails_clearly():
     r = _rpc_server(head=1_000_000, mint_block=777_777, logs_limit=10, archive=False)
     with pytest.raises(RuntimeError, match="no archive"):
         r.minted_at(4, 1)
+
+
+def test_quote_reference():
+    from token_monitor.positions import quote_reference
+    assert quote_reference("USDG") is None                       # стейбл = $1 без запроса
+    assert quote_reference("ETH") == quote_reference("WETH")     # нативный ETH — по эталонному WETH
+    assert quote_reference("WBNB")[1] is Network.BSC
+    assert quote_reference("PEPE") is None

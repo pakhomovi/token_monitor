@@ -121,6 +121,15 @@ BASE_SYMBOLS = frozenset(s.lower() for s in (
 ))
 
 
+STABLE_SYMBOLS = frozenset(s.lower() for s in (
+    "USDT", "USDC", "USDbC", "USDG", "USD1", "USDe", "DAI", "BUSD", "FDUSD", "TUSD", "PYUSD", "lisUSD",
+))
+
+
+def is_stable(symbol: str | None) -> bool:
+    return (symbol or "").lower() in STABLE_SYMBOLS
+
+
 def is_base(symbol: str | None) -> bool:
     return (symbol or "").lower() in BASE_SYMBOLS
 
@@ -230,13 +239,16 @@ class CodexScreener:
             log.info("screener: dropped %d of %d rows without fee/liquidity", len(rows) - len(pools), len(rows))
         return pools
 
-    def token_prices(self, tokens: list[tuple[str, Network]], timestamp: int | None = None) -> dict[str, float]:
-        """USD-цены токенов (адрес в нижнем регистре → цена); timestamp — цена на момент в прошлом."""
-        inputs = [{"address": a, "networkId": NETWORK_IDS[n], **({"timestamp": timestamp} if timestamp else {})}
-                  for a, n in tokens]
-        data = self._request({"query": "query($i:[GetPriceInput]){getTokenPrices(inputs:$i){address priceUsd}}",
-                              "variables": {"i": inputs}})
-        return {p["address"].lower(): p["priceUsd"] for p in data.get("getTokenPrices") or [] if p}
+    def prices(self, inputs: list[tuple[str, Network, int | None]]) -> list[float | None]:
+        """USD-цены одним запросом, в порядке inputs; timestamp у каждого свой (None — текущая)."""
+        if not inputs:
+            return []
+        payload = [{"address": a, "networkId": NETWORK_IDS[n], **({"timestamp": ts} if ts else {})}
+                   for a, n, ts in inputs]
+        data = self._request({"query": "query($i:[GetPriceInput]){getTokenPrices(inputs:$i){priceUsd}}",
+                              "variables": {"i": payload}})
+        out = data.get("getTokenPrices") or []
+        return [(p or {}).get("priceUsd") for p in out] + [None] * (len(inputs) - len(out))
 
     def pairs(self, pools: list[tuple[str, Network]]) -> list[dict[str, Any]]:
         """Метрики конкретных пулов (v3 — адрес, v4 — poolId)."""

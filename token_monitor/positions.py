@@ -1,8 +1,22 @@
 """Разбор LP-позиции в терминах стратегии: цена целевого токена в quote, диапазон, состав, комиссии."""
 from dataclasses import dataclass
 
+from .models import Network
 from .onchain import Position, amounts, sqrt_price_at_tick
-from .screener import is_base
+from .screener import is_base, is_stable
+
+# Цена ETH/BNB одинакова во всех сетях: одна эталонная пара на всех (нативный ETH адреса не имеет)
+_QUOTE_REFERENCE = {
+    "eth": ("0x4200000000000000000000000000000000000006", Network.BASE),
+    "weth": ("0x4200000000000000000000000000000000000006", Network.BASE),
+    "bnb": ("0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c", Network.BSC),
+    "wbnb": ("0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c", Network.BSC),
+}
+
+
+def quote_reference(symbol: str) -> tuple[str, Network] | None:
+    """Откуда брать $-цену quote-актива; None — стейбл (= $1) или неизвестный актив."""
+    return None if is_stable(symbol) else _QUOTE_REFERENCE.get(symbol.lower())
 
 
 @dataclass(frozen=True, slots=True)

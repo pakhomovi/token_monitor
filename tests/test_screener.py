@@ -232,3 +232,17 @@ def test_cli_strategy_override(monkeypatch, capsys):
 def test_protocol_version(pair_extra, exchange, expected):
     from token_monitor.screener import protocol_version
     assert protocol_version(row(pair={**row()["pair"], **pair_extra}, exchange=exchange)) == expected
+
+
+def test_prices_single_request_keeps_order_and_pads_missing():
+    seen = []
+
+    def handler(req):
+        seen.append(json.loads(req.content))
+        return httpx.Response(200, json={"data": {"getTokenPrices": [{"priceUsd": 2.5}, None]}})
+
+    got = make(handler).prices([("0xa", Network.BASE, None), ("0xb", Network.ROBINHOOD, 1_700_000_000),
+                                ("0xc", Network.BSC, None)])
+    assert got == [2.5, None, None]
+    assert len(seen) == 1
+    assert seen[0]["variables"]["i"][1] == {"address": "0xb", "networkId": 4663, "timestamp": 1_700_000_000}

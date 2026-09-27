@@ -8,9 +8,9 @@ from .config import Settings, load_settings
 from .models import Network, PoolSnapshot
 from .pipeline import Scored, screen
 from .scoring import Params, RangeStress, min_fee_for, stress_model
-from .screener import CodexError, CodexScreener, ScreenerQuery, parse_pair
-from .onchain import NATIVE, ChainReader, parse_position_url
-from .positions import PositionView
+from .screener import CodexError, CodexScreener, ScreenerQuery, is_stable, parse_pair
+from .onchain import ChainReader, parse_position_url
+from .positions import PositionView, quote_reference
 from .strategy import RangePosition, Shape
 
 
@@ -143,14 +143,11 @@ def _num(x: float) -> str:
     return f"{x:,.2f}" if abs(x) >= 100 else f"{x:.4g}"
 
 
-def _position_report(v: PositionView, usd: float | None, vol24: float | None,
-                     minted: int | None = None, usd_at_entry: float | None = None,
-                     quote_usd: float | None = None) -> str:
+def _position_report(v: PositionView, q_usd: float | None, vol24: float | None,
+                     minted: int | None = None, usd_at_entry: float | None = None) -> str:
     p, t, q = v.pos, v.target, v.quote
     lo, hi = v.range
     where = ("выше диапазона" if v.from_top > 0 else "ниже диапазона" if not p.in_range else "в диапазоне")
-    # Прямая цена quote точнее; через цену токена — только для нативного ETH без адреса
-    q_usd = quote_usd or (usd / v.price if usd else None)
 
     def money(amount_q: float) -> str:
         return f"{_num(amount_q)} {q.symbol}" + (f" (${amount_q * q_usd:,.2f})" if q_usd else "")
@@ -203,28 +200,31 @@ def cmd_position(args: argparse.Namespace) -> int:
                     except RuntimeError as e:
                         print(f"#{i}: дата входа недоступна ({e})", file=sys.stderr)
 
-    usd: dict[str, float] = {}
+    # Цена токена в quote уже есть с блокчейна (slot0); в $ нужна только цена quote: стейбл = $1,
+    # ETH/BNB — по одной эталонной паре. Всё остальное из Codex — ровно 2 запроса на любое число позиций
+    q_usd: dict[str, float | None] = {v.quote.symbol: 1.0 for v in views if is_stable(v.quote.symbol)}
+    refs_q = list(dict.fromkeys(r for v in views if (r := quote_reference(v.quote.symbol))))
+    entries = [(v, ts) for v in views if (ts := minted.get((v.pos.network, v.pos.token_id)))]
     entry_usd: dict[tuple[Network, int], float | None] = {}
     vols: dict[str, float] = {}
     if st.codex_api_key:
         try:
             with CodexScreener(st.codex_api_key) as codex:
-                usd = codex.token_prices([(t.address, v.pos.network) for v in views for t in (v.target, v.quote)
-                                          if t.address != NATIVE])
-                entry_usd = {
-                    (v.pos.network, v.pos.token_id): codex.token_prices(
-                        [(v.target.address, v.pos.network)], timestamp=ts).get(v.target.address.lower())
-                    for v in views if (ts := minted.get((v.pos.network, v.pos.token_id)))
-                }
+                got = codex.prices([(a, n, None) for a, n in refs_q]
+                                   + [(v.target.address, v.pos.network, ts) for v, ts in entries])
+                ref_usd = dict(zip(refs_q, got))
+                q_usd |= {v.quote.symbol: ref_usd.get(quote_reference(v.quote.symbol)) for v in views
+                          if quote_reference(v.quote.symbol)}
+                entry_usd = {(v.pos.network, v.pos.token_id): p for (v, _), p in zip(entries, got[len(refs_q):])}
                 for row in codex.pairs(list({(v.pos.pool, v.pos.network) for v in views})):
                     vols[row["pair"]["address"].lower()] = float(row.get("volumeUSD24") or 0)
         except CodexError as e:
-            print(f"codex: {e} (без $-оценок)", file=sys.stderr)
+            print(f"codex: {e} (без объёма и цен ETH/BNB)", file=sys.stderr)
 
     for v in views:
         key = (v.pos.network, v.pos.token_id)
-        print(_position_report(v, usd.get(v.target.address.lower()), vols.get(v.pos.pool.lower()),
-                               minted.get(key), entry_usd.get(key), usd.get(v.quote.address.lower())), end="\n\n")
+        print(_position_report(v, q_usd.get(v.quote.symbol), vols.get(v.pos.pool.lower()),
+                               minted.get(key), entry_usd.get(key)), end="\n\n")
     return 0
 
 
