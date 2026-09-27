@@ -110,10 +110,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
               f"{', '.join(reasons) or '-'}")
     print()
 
-    # Для ручного анализа важнее, где лежит ликвидность, чем порядок по вердикту
+    # Сортировка по объёму: пулы с «бумажной» ликвидностью без торгов (оценка по неликвидной
+    # паре) иначе вытесняют реальные
     cfg = _params(st, args)
     results = sorted(screen([p for _, p in parsed], cfg, keep_skipped=True),
-                     key=lambda s: -s.pool.liquidity_usd)
+                     key=lambda s: (-s.pool.vol_24h_usd, -s.pool.liquidity_usd))
     shown, hidden = results[:args.top], results[args.top:]
     for s in shown:
         print(_row(s))
@@ -128,7 +129,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         for s in [s for s in results if s.pool.fee_bps > 0][:args.scenarios]:
             print(_strategy_table(model.pos, s.pool))
     print(f"\ntotal: liq ${total_liq:,.0f}, vol24 ${total_vol:,.0f}, "
-          f"top pool holds {results[0].pool.liquidity_usd / total_liq:.0%} of liquidity" if total_liq else "")
+          f"top pool makes {results[0].pool.vol_24h_usd / total_vol:.0%} of volume" if total_vol else "")
     return 0
 
 
@@ -149,9 +150,9 @@ def main(argv: list[str] | None = None) -> int:
     an.add_argument("token", help="адрес токена")
     an.add_argument("--network", choices=[n.value for n in Network])
     an.add_argument("--min-liq", type=float, default=1_000, help="нижняя граница ликвидности пула, $")
-    an.add_argument("--top", type=int, default=10, help="сколько пулов показать (по ликвидности)")
+    an.add_argument("--top", type=int, default=10, help="сколько пулов показать (по объёму)")
     an.add_argument("--scenarios", type=int, default=0, metavar="N",
-                    help="подробные сценарии для N крупнейших пулов")
+                    help="подробные сценарии для N самых торгуемых пулов")
     an.set_defaults(func=cmd_analyze)
 
     args = ap.parse_args(argv)

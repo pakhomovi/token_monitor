@@ -26,6 +26,7 @@ class PoolSnapshot:
     vol_1h_usd: float
     vol_24h_usd: float
     symbol: str = ""
+    vol_4h_usd: float | None = None
     exchange: str = ""
     # Качество активности за 24ч (None = индексатор не вернул)
     txns_24h: int | None = None

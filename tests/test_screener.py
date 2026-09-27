@@ -35,7 +35,22 @@ def test_parse_picks_non_quote_token_and_normalizes():
     p = parse_pair(row())
     assert (p.address, p.token, p.symbol, p.network) == ("0xpool", "0xtoken", "CAKE", Network.BSC)
     assert (p.fee_bps, p.liquidity_usd, p.vol_1h_usd, p.vol_24h_usd) == (100, 100_000, 10_000, 240_000)
-    assert parse_pair(row(quoteToken="token0")).token == "0xwbnb"
+    # Базовый актив по символу приоритетнее quoteToken
+    assert parse_pair(row(quoteToken="token0")).token == "0xtoken"
+    # Если базового нет — решает quoteToken
+    memes = {"token0": {"symbol": "CAKE"}, "token1": {"symbol": "PEPE"}}
+    assert parse_pair(row(quoteToken="token0", **memes)).token == "0xwbnb"
+
+
+def test_major_pairs_are_dropped_unless_analyzed():
+    majors = {"token0": {"symbol": "usdt"}, "token1": {"symbol": "WBNB"}}
+    assert parse_pair(row(**majors)) is None
+    assert parse_pair(row(**majors), target="0xWBNB").token == "0xwbnb"
+
+
+def test_parse_vol_4h():
+    assert parse_pair(row(volumeUSD4="40000")).vol_4h_usd == 40_000
+    assert parse_pair(row()).vol_4h_usd is None
 
 
 @pytest.mark.parametrize("override", [

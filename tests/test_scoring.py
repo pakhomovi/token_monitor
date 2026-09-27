@@ -5,7 +5,8 @@ import pytest
 
 from token_monitor.models import Network, PoolSnapshot, SecurityInfo, Verdict
 from token_monitor.scoring import (FullRangeStress, Params, RangeStress, activity_flags, classify_market,
-                                   daily_yield, security_flags, stress_loss, stress_model)
+                                   daily_yield, persistence_ratio, security_flags, stress_loss,
+                                   stress_model)
 from token_monitor.strategy import Shape
 
 
@@ -157,9 +158,9 @@ def test_bottom_scenario_does_not_decide_verdict():
     p = next(pool(vol_1h_usd=v / 24, vol_24h_usd=v, txns_24h=2_000, unique_wallets_24h=500,
                   fresh_wallet_share=0.05)
              for v in range(1_000, 500_000, 1_000)
-             if model.breakeven(pool(vol_24h_usd=v), v)[0] <= SPOT.slow_horizon_days)
+             if model.breakeven(pool(vol_24h_usd=v), v)[0] <= SPOT.strategy_horizon_days)
     r = classify_market(p, SPOT)
-    assert r.metrics["cover_100"] > SPOT.slow_horizon_days
+    assert r.metrics["cover_100"] > SPOT.strategy_horizon_days
     assert r.verdict is Verdict.SLOW
 
 
@@ -172,3 +173,16 @@ def test_unstable_volume_reason_is_explicit():
     # Комиссий хватает по 24ч, но последний час затих: отсекает persistence, а не доходность
     r = classify_market(pool(**{**ORGANIC, "vol_1h_usd": 2_000}), SPOT)
     assert r.verdict is Verdict.SKIP and r.reasons[0].startswith("unstable volume: persistence 0.20")
+
+
+def test_range_uses_its_own_horizon():
+    assert stress_model(SPOT).horizon_days == SPOT.strategy_horizon_days == 2.0
+    assert stress_model(FR).horizon_days == FR.slow_horizon_days
+
+
+def test_persistence_uses_4h_window():
+    # Кейс NOSH: последний час тихий (1h-метрика 0.55), но 4ч идут в среднесуточном темпе
+    p = pool(vol_1h_usd=5_504, vol_4h_usd=40_258, vol_24h_usd=241_656)
+    assert isclose(persistence_ratio(p), 40_258 * 6 / 241_656)
+    assert persistence_ratio(replace(p, vol_4h_usd=None)) == 5_504 * 24 / 241_656   # fallback на 1ч
+    assert persistence_ratio(pool(vol_24h_usd=0)) == 0

@@ -14,7 +14,7 @@ class Params:
     stress_drop: float = 0.30        # стресс-сценарий: цена токена -30%
     slow_horizon_days: float = 7.0
     fast_horizon_hours: float = 12.0
-    min_persistence: float = 0.6     # vol_1h*24 / vol_24h: активность не затухает...
+    min_persistence: float = 0.6     # vol_4h*6 / vol_24h: активность не затухает...
     max_persistence: float = 3.0     # ...и это не разовый всплеск (памп, свежий пул)
     strict_unknown: bool = True      # отсутствующие security-данные считаются флагом
     # Wash/бот-объём: комиссии с него реальны, но это приманка и он не устойчив
@@ -25,6 +25,7 @@ class Params:
     strategy: str = "spot"
     strategy_depth: float = 0.7      # диапазон до -70%
     strategy_size: float = 1000      # размер позиции, $
+    strategy_horizon_days: float = 2.0   # ¼ и ½ диапазона — мягкие сценарии, горизонт короче
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +42,15 @@ def daily_yield(fee_bps: float, daily_volume: float, liquidity: float) -> float:
 def stress_loss(drop: float) -> float:
     # Full-range LP: стоимость позиции в quote-активе = sqrt(P1/P0) от входа
     return 1 - sqrt(1 - drop)
+
+
+def persistence_ratio(p: PoolSnapshot) -> float:
+    """Темп последних 4ч к среднему за сутки. Окно 1ч шумное: один тихий час отсекал стабильный пул.
+    Без vol_4h (старые снапшоты) — откат на окно 1ч."""
+    if p.vol_24h_usd <= 0:
+        return 0.0
+    recent = p.vol_4h_usd * 6 if p.vol_4h_usd is not None else p.vol_1h_usd * 24
+    return recent / p.vol_24h_usd
 
 
 def activity_flags(p: PoolSnapshot, cfg: Params = Params()) -> list[str]:
@@ -61,14 +71,16 @@ class StressModel(Protocol):
     """Сколько дней комиссии должны капать, чтобы покрыть потерю позиции в стресс-сценарии."""
 
     label: str
+    horizon_days: float
 
     def breakeven(self, p: PoolSnapshot, daily_volume: float) -> tuple[float, dict[str, float]]: ...
 
 
 class FullRangeStress:
-    def __init__(self, drop: float):
+    def __init__(self, drop: float, horizon_days: float):
         self.loss = stress_loss(drop)
         self.label = f"full-range -{drop:.0%}"
+        self.horizon_days = horizon_days
 
     def breakeven(self, p: PoolSnapshot, daily_volume: float) -> tuple[float, dict[str, float]]:
         y = daily_yield(p.fee_bps, daily_volume, p.liquidity_usd)
@@ -82,9 +94,10 @@ class RangeStress:
     DECISIVE = (0.25, 0.5)
     REFERENCE = 1.0
 
-    def __init__(self, position: RangePosition):
+    def __init__(self, position: RangePosition, horizon_days: float):
         self.pos = position
         self.label = f"{position.shape.value} -{position.depth:.0%}"
+        self.horizon_days = horizon_days
 
     def cover_days(self, p: PoolSnapshot, daily_volume: float, fraction: float) -> float:
         price = 1 - self.pos.depth * fraction
@@ -100,8 +113,9 @@ class RangeStress:
 
 def stress_model(cfg: Params) -> StressModel:
     if cfg.strategy == "fullrange":
-        return FullRangeStress(cfg.stress_drop)
-    return RangeStress(RangePosition(cfg.strategy_size, cfg.strategy_depth, Shape(cfg.strategy)))
+        return FullRangeStress(cfg.stress_drop, cfg.slow_horizon_days)
+    return RangeStress(RangePosition(cfg.strategy_size, cfg.strategy_depth, Shape(cfg.strategy)),
+                       cfg.strategy_horizon_days)
 
 
 def classify_market(p: PoolSnapshot, cfg: Params = Params(),
@@ -116,7 +130,7 @@ def classify_market(p: PoolSnapshot, cfg: Params = Params(),
         return MarketResult(Verdict.SKIP, ["no LP fee (hook pool)"])
 
     model = model or stress_model(cfg)
-    persistence = p.vol_1h_usd * 24 / p.vol_24h_usd if p.vol_24h_usd > 0 else 0.0
+    persistence = persistence_ratio(p)
     be_days, extra = model.breakeven(p, p.vol_24h_usd)
     be_days_now, _ = model.breakeven(p, p.vol_1h_usd * 24)
     be_hours_now = be_days_now * 24
@@ -131,11 +145,11 @@ def classify_market(p: PoolSnapshot, cfg: Params = Params(),
     }
 
     stable = cfg.min_persistence <= persistence <= cfg.max_persistence
-    if stable and be_days <= cfg.slow_horizon_days:
+    if stable and be_days <= model.horizon_days:
         verdict, reason = Verdict.SLOW, f"breakeven {be_days:.1f}d, persistence {persistence:.2f}"
     elif be_hours_now <= cfg.fast_horizon_hours:
         verdict, reason = Verdict.FAST, f"hot now: breakeven {be_hours_now:.1f}h"
-    elif be_days <= cfg.slow_horizon_days:
+    elif be_days <= model.horizon_days:
         # Комиссий хватает, но объём нестабилен: на него нельзя опираться весь горизонт
         return MarketResult(Verdict.SKIP, [f"unstable volume: persistence {persistence:.2f}, "
                                            f"breakeven {be_days:.1f}d"], metrics)

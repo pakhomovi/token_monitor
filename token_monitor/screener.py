@@ -31,6 +31,7 @@ query Screen($filters: PairFilters, $rankings: [PairRanking], $limit: Int) {
       quoteToken
       liquidity
       volumeUSD1
+      volumeUSD4
       volumeUSD24
       poolFeeBps
       dynamicFee
@@ -101,6 +102,18 @@ def _int(v: Any) -> int | None:
     return int(n) if n is not None else None
 
 
+# Базовые активы: пул мажор/стейбл не интересен для ресерча, а в паре с мемом целевой — мем.
+# По символу, т.к. адреса на Robinhood не зафиксированы; подделка символа лишь исключит пул
+BASE_SYMBOLS = frozenset(s.lower() for s in (
+    "WETH", "ETH", "WBNB", "BNB", "WBTC", "BTCB", "cbBTC", "BTC", "cbETH", "wstETH", "weETH",
+    "USDT", "USDC", "USDbC", "USDG", "USD1", "USDe", "DAI", "BUSD", "FDUSD", "TUSD", "PYUSD", "lisUSD",
+))
+
+
+def is_base(symbol: str | None) -> bool:
+    return (symbol or "").lower() in BASE_SYMBOLS
+
+
 # v2-фабрики не отдают fee: комиссия зашита в контракт. Неизвестный форк не угадываем
 V2_FEE_BPS: dict[str, float] = {
     "0xca143ce32fe78f1f7019d7d551a6402fc5350c73": 25,   # PancakeSwap v2 (BSC)
@@ -135,10 +148,16 @@ def parse_pair(row: dict[str, Any], target: str | None = None) -> PoolSnapshot |
     if not (network and pair.get("address") and fee is not None and liquidity is not None):
         return None
 
-    # Целевой токен — не quote-сторона пары (WBNB/USDT/WETH)
-    side = "token0" if row.get("quoteToken") == "token1" else "token1"
+    sym0, sym1 = ((row.get(t) or {}).get("symbol") for t in ("token0", "token1"))
     if target and target.lower() in (str(pair.get("token0")).lower(), str(pair.get("token1")).lower()):
         side = "token0" if str(pair["token0"]).lower() == target.lower() else "token1"
+    elif is_base(sym0) and is_base(sym1):
+        return None                      # мажор/стейбл пара: не кандидат
+    elif is_base(sym0) != is_base(sym1):
+        side = "token1" if is_base(sym0) else "token0"
+    else:
+        # Целевой токен — не quote-сторона пары
+        side = "token0" if row.get("quoteToken") == "token1" else "token1"
     return PoolSnapshot(
         address=pair["address"].lower(),
         token=pair[side].lower(),
@@ -147,6 +166,7 @@ def parse_pair(row: dict[str, Any], target: str | None = None) -> PoolSnapshot |
         liquidity_usd=liquidity,
         vol_1h_usd=_num(row.get("volumeUSD1")) or 0.0,
         vol_24h_usd=_num(row.get("volumeUSD24")) or 0.0,
+        vol_4h_usd=_num(row.get("volumeUSD4")),
         symbol=(row.get(side) or {}).get("symbol") or "",
         exchange=(row.get("exchange") or {}).get("name") or "",
         txns_24h=_int(row.get("txnCount24")),
