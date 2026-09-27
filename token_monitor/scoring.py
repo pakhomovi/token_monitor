@@ -9,7 +9,8 @@ from .strategy import RangePosition, Shape
 @dataclass(frozen=True, slots=True)
 class Params:
     min_liquidity: float = 10_000    # позиции $300–1500: мелкий пул с большим объёмом рядом с крупным
-    min_fee_bps: float = 100         # целевые пулы — 1% v3/v4, ниже комиссий не хватает
+    min_fee_bps: float = 100         # v2/v3: целевой тир 1%
+    min_fee_bps_v4: float = 50       # v4: произвольная комиссия, берём от 0.5%
     max_tax: float = 0.05
     max_top10: float = 0.35
     stress_drop: float = 0.30        # стресс-сценарий: цена токена -30%
@@ -119,6 +120,10 @@ def stress_model(cfg: Params) -> StressModel:
                        cfg.strategy_horizon_days)
 
 
+def min_fee_for(p: PoolSnapshot, cfg: Params) -> float:
+    return cfg.min_fee_bps_v4 if p.version == 4 else cfg.min_fee_bps
+
+
 def classify_market(p: PoolSnapshot, cfg: Params = Params(),
                     model: StressModel | None = None) -> MarketResult:
     """Этап 2 воронки: только рыночная математика, без сетевых запросов.
@@ -158,7 +163,8 @@ def classify_market(p: PoolSnapshot, cfg: Params = Params(),
         return MarketResult(Verdict.SKIP, [f"fees don't cover {model.label} within horizon"], metrics)
 
     # Гейты применяются только к пулам, прошедшим математику: мёртвый пул — не wash
-    gate = (f"fee {p.fee_bps / 100:g}% < {cfg.min_fee_bps / 100:g}%" if p.fee_bps < cfg.min_fee_bps else
+    min_fee = min_fee_for(p, cfg)
+    gate = (f"fee {p.fee_bps / 100:g}% < {min_fee / 100:g}% (v{p.version or '?'})" if p.fee_bps < min_fee else
             f"liquidity < ${cfg.min_liquidity:,.0f}" if p.liquidity_usd < cfg.min_liquidity else None)
     if gate:
         return MarketResult(Verdict.SKIP, [gate, f"else {verdict.value.upper()}: {reason}"], metrics)

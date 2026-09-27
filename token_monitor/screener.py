@@ -1,5 +1,6 @@
 """Этап 1 воронки: один запрос к Codex `filterPairs` → top-N пулов."""
 import logging
+import re
 import random
 import time
 from dataclasses import dataclass
@@ -24,7 +25,7 @@ QUERY = """
 query Screen($filters: PairFilters, $rankings: [PairRanking], $limit: Int) {
   filterPairs(filters: $filters, rankings: $rankings, limit: $limit) {
     results {
-      pair { address networkId token0 token1 fee }
+      pair { address networkId token0 token1 fee protocol }
       token0 { symbol }
       token1 { symbol }
       exchange { name address exchangeVersion }
@@ -136,6 +137,16 @@ def resolve_fee_bps(row: dict[str, Any]) -> float | None:
     return V2_FEE_BPS.get(str(exchange.get("address")).lower())
 
 
+def protocol_version(row: dict[str, Any]) -> int | None:
+    """UniswapV3 → 3, UniswapV4 → 4; PancakeSwap Infinity — v4-архитектура. Иначе exchangeVersion."""
+    protocol = str((row.get("pair") or {}).get("protocol") or "")
+    if "infinity" in protocol.lower():
+        return 4
+    if m := re.search(r"V(\d)$", protocol):
+        return int(m[1])
+    return _int((row.get("exchange") or {}).get("exchangeVersion"))
+
+
 def parse_pair(row: dict[str, Any], target: str | None = None) -> PoolSnapshot | None:
     """None для строк, по которым нельзя посчитать доходность (нет комиссии, чужая сеть и т.п.).
 
@@ -167,6 +178,7 @@ def parse_pair(row: dict[str, Any], target: str | None = None) -> PoolSnapshot |
         vol_1h_usd=_num(row.get("volumeUSD1")) or 0.0,
         vol_24h_usd=_num(row.get("volumeUSD24")) or 0.0,
         vol_4h_usd=_num(row.get("volumeUSD4")),
+        version=protocol_version(row),
         symbol=(row.get(side) or {}).get("symbol") or "",
         exchange=(row.get("exchange") or {}).get("name") or "",
         txns_24h=_int(row.get("txnCount24")),

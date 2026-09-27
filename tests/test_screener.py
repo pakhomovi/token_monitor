@@ -219,3 +219,16 @@ def test_cli_strategy_override(monkeypatch, capsys):
     assert "cover ¼" in out and "bidask -60% $1,000" in out
     for scenario in ("¼ range", "½ range", "bottom", "below"):
         assert scenario in out
+
+
+@pytest.mark.parametrize("pair_extra,exchange,expected", [
+    ({"protocol": "UniswapV3"}, {}, 3),
+    ({"protocol": "UniswapV4"}, {}, 4),
+    ({"protocol": "PancakeSwapInfinityCL"}, {}, 4),
+    ({"protocol": None}, {"exchangeVersion": "2"}, 2),
+    ({"protocol": "PonsV2"}, {}, 2),
+    ({}, {}, None),
+])
+def test_protocol_version(pair_extra, exchange, expected):
+    from token_monitor.screener import protocol_version
+    assert protocol_version(row(pair={**row()["pair"], **pair_extra}, exchange=exchange)) == expected

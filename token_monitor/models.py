@@ -28,6 +28,7 @@ class PoolSnapshot:
     symbol: str = ""
     vol_4h_usd: float | None = None
     exchange: str = ""
+    version: int | None = None     # 2 / 3 / 4 (Uniswap-совместимые протоколы)
     # Качество активности за 24ч (None = индексатор не вернул)
     txns_24h: int | None = None
     unique_wallets_24h: int | None = None

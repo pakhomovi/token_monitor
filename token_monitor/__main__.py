@@ -38,7 +38,8 @@ def cmd_screen(args: argparse.Namespace) -> int:
         limit=args.limit or st.screen_limit,
         min_liquidity=st.params.min_liquidity,
         min_volume_24h=st.screen_min_volume_24h,
-        min_fee_bps=st.params.min_fee_bps,
+        # Сервер не знает версию пула: берём мягкий порог, точный применяет скоринг
+        min_fee_bps=min(st.params.min_fee_bps, st.params.min_fee_bps_v4),
         rank_by=st.screen_rank_by,
     )
     try:

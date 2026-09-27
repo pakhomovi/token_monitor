@@ -191,10 +191,24 @@ def test_persistence_uses_4h_window():
 def test_fee_below_one_percent_is_skipped_with_would_be_verdict():
     # Объём ×10, чтобы 0.3% проходил математику и отсекал именно порог комиссии
     r = classify_market(pool(**{**ORGANIC, "fee_bps": 30, "vol_1h_usd": 100_000, "vol_24h_usd": 2_400_000}), Params())
-    assert r.verdict is Verdict.SKIP and r.reasons[0] == "fee 0.3% < 1%" and r.reasons[1].startswith("else")
+    assert r.verdict is Verdict.SKIP and r.reasons[0] == "fee 0.3% < 1% (v?)" and r.reasons[1].startswith("else")
 
 
 def test_defaults_target_small_one_percent_pools():
     p = Params()
     assert (p.min_liquidity, p.min_fee_bps) == (10_000, 100)
     assert classify_market(pool(**{**ORGANIC, "liquidity_usd": 12_000}), p).verdict is not Verdict.SKIP
+
+
+@pytest.mark.parametrize("version,fee,passes", [
+    (3, 100, True), (3, 60, False),      # v3: только 1%
+    (4, 60, True), (4, 50, True), (4, 40, False),   # v4: от 0.5%
+    (None, 60, False),                    # версия неизвестна → строгий порог
+])
+def test_fee_threshold_depends_on_version(version, fee, passes):
+    # Объём ×10, чтобы комиссия от 0.4% проходила математику
+    p = pool(**{**ORGANIC, "fee_bps": fee, "version": version, "vol_1h_usd": 100_000, "vol_24h_usd": 2_400_000})
+    r = classify_market(p, Params())
+    assert (r.verdict is not Verdict.SKIP) is passes
+    if not passes:
+        assert r.reasons[0].startswith(f"fee {fee / 100:g}%")
