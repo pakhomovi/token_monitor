@@ -1,6 +1,7 @@
 import argparse
 import logging
 import sys
+import time
 from dataclasses import replace
 
 from .config import Settings, load_settings
@@ -142,7 +143,8 @@ def _num(x: float) -> str:
     return f"{x:,.2f}" if abs(x) >= 100 else f"{x:.4g}"
 
 
-def _position_report(v: PositionView, usd: float | None, vol24: float | None) -> str:
+def _position_report(v: PositionView, usd: float | None, vol24: float | None,
+                     minted: int | None = None, usd_at_entry: float | None = None) -> str:
     p, t, q = v.pos, v.target, v.quote
     lo, hi = v.range
     where = ("выше диапазона" if v.from_top > 0 else "ниже диапазона" if not p.in_range else "в диапазоне")
@@ -162,6 +164,16 @@ def _position_report(v: PositionView, usd: float | None, vol24: float | None) ->
         f"  комиссии  {_num(ft)} {t.symbol} + {_num(fq)} {q.symbol} = {money(v.fees_value)} "
         f"({v.fees_value / v.value_at_top:.1%} от входа)" if v.value_at_top else "",
     ]
+    if minted:
+        days = (time.time() - minted) / 86400
+        entry = f"  вход      {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(minted))} ({days * 24:.0f}ч назад)"
+        if usd_at_entry and q_usd:
+            # Совпадает ли верх диапазона с ценой на момент входа (quote в $ берём текущий)
+            entry += f", токен тогда ${usd_at_entry:.4g}, верх диапазона {hi * q_usd / usd_at_entry - 1:+.0%} от неё"
+        lines.append(entry)
+        if v.value_at_top and days > 0:
+            lines.append(f"  факт      комиссии {v.fees_value / v.value_at_top / days:.1%}/день от входа "
+                         f"с момента минта (только несобранные: если собирали — больше)")
     share = p.fee_share
     if p.in_range and vol24:
         per_day = p.fee_bps / 1e4 * vol24 * share
@@ -176,23 +188,40 @@ def cmd_position(args: argparse.Namespace) -> int:
     st = load_settings()
     refs = [parse_position_url(u) for u in args.urls]
     views: list[PositionView] = []
+    minted: dict[tuple[Network, int], int] = {}
     for network in dict.fromkeys(n for n, _, _ in refs):
         with ChainReader(network) as reader:
-            views += [PositionView(reader.position(v, i)) for n, v, i in refs if n == network]
+            for n, ver, i in refs:
+                if n != network:
+                    continue
+                views.append(PositionView(reader.position(ver, i)))
+                if not args.no_entry:
+                    try:
+                        minted[(n, i)] = reader.minted_at(ver, i)[1]
+                    except RuntimeError as e:
+                        print(f"#{i}: дата входа недоступна ({e})", file=sys.stderr)
 
     usd: dict[str, float] = {}
+    entry_usd: dict[tuple[Network, int], float | None] = {}
     vols: dict[str, float] = {}
     if st.codex_api_key:
         try:
             with CodexScreener(st.codex_api_key) as codex:
                 usd = codex.token_prices([(v.target.address, v.pos.network) for v in views])
+                entry_usd = {
+                    (v.pos.network, v.pos.token_id): codex.token_prices(
+                        [(v.target.address, v.pos.network)], timestamp=ts).get(v.target.address.lower())
+                    for v in views if (ts := minted.get((v.pos.network, v.pos.token_id)))
+                }
                 for row in codex.pairs(list({(v.pos.pool, v.pos.network) for v in views})):
                     vols[row["pair"]["address"].lower()] = float(row.get("volumeUSD24") or 0)
         except CodexError as e:
             print(f"codex: {e} (без $-оценок)", file=sys.stderr)
 
     for v in views:
-        print(_position_report(v, usd.get(v.target.address.lower()), vols.get(v.pos.pool.lower())), end="\n\n")
+        key = (v.pos.network, v.pos.token_id)
+        print(_position_report(v, usd.get(v.target.address.lower()), vols.get(v.pos.pool.lower()),
+                               minted.get(key), entry_usd.get(key)), end="\n\n")
     return 0
 
 
@@ -220,6 +249,7 @@ def main(argv: list[str] | None = None) -> int:
 
     po = sub.add_parser("position", help="LP-позиции Uniswap по ссылкам app.uniswap.org/positions/...")
     po.add_argument("urls", nargs="+")
+    po.add_argument("--no-entry", action="store_true", help="не искать дату входа (быстрее)")
     po.set_defaults(func=cmd_position)
 
     args = ap.parse_args(argv)

@@ -4,6 +4,7 @@
 Адреса контрактов — из @uniswap/sdk-core (sdks/sdk-core/src/addresses.ts).
 """
 import os
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -128,6 +129,9 @@ def v4_unpack_info(info: int) -> tuple[int, int]:
     return signed(info >> 8, 24), signed(info >> 32, 24)
 
 
+TRANSFER_TOPIC = keccak256(b"Transfer(address,address,uint256)")
+
+
 def v4_pool_id(currency0: str, currency1: str, fee: int, tick_spacing: int, hooks: str) -> bytes:
     return keccak256(bytes.fromhex("".join(word(v) for v in (currency0, currency1, fee, tick_spacing, hooks))))
 
@@ -199,7 +203,7 @@ class Position:
 
 class ChainReader:
     def __init__(self, network: Network, *, client: httpx.Client | None = None, url: str | None = None,
-                 max_batch: int = 4, retries: int = 5, sleep: Callable[[float], None] = time.sleep):
+                 max_batch: int = 4, retries: int = 7, sleep: Callable[[float], None] = time.sleep):
         self.network = network
         self.chain = CHAINS[network]
         self.url = url or os.environ.get(f"RPC_{network.name}") or self.chain.rpc
@@ -229,7 +233,7 @@ class ChainReader:
             except RateLimited:
                 if attempt == self._retries:
                     raise
-                self._sleep(0.5 * 2 ** attempt)
+                self._sleep(min(0.5 * 2 ** attempt, 20) * random.uniform(0.5, 1.5))
         raise AssertionError("unreachable")
 
     def _batch(self, calls: Sequence[tuple[str, str]]) -> list[str]:
@@ -258,6 +262,69 @@ class ChainReader:
         results = self.batch([(a, calldata(s)) for a in erc20 for s in ("symbol()", "decimals()")])
         meta = {a: Token(a, decode_string(results[2 * i]), words(results[2 * i + 1])[0]) for i, a in enumerate(erc20)}
         return [meta.get(a) or Token(NATIVE, "ETH", 18) for a in addresses]
+
+    def _rpc(self, method: str, params: list) -> object:
+        for attempt in range(self._retries + 1):
+            resp = self._client.post(self.url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+            body = resp.json() if resp.status_code != 429 else {"error": {"message": "rate limit"}}
+            err = str(body.get("error") or "")
+            if "rate limit" in err.lower() and attempt < self._retries:
+                self._sleep(min(0.5 * 2 ** attempt, 20) * random.uniform(0.5, 1.5))
+                continue
+            if "error" in body:
+                raise RuntimeError(f"rpc {method}: {body['error']}")
+            return body["result"]
+        raise AssertionError("unreachable")
+
+    def block_timestamp(self, block: int | str = "latest") -> int:
+        tag = hex(block) if isinstance(block, int) else block
+        return int(self._rpc("eth_getBlockByNumber", [tag, False])["timestamp"], 16)
+
+    def minted_at(self, version: int, token_id: int) -> tuple[int, int]:
+        """(блок, unix-время) минта NFT позиции — фактически момент входа.
+
+        Сначала событие Transfer(0x0 → owner) через eth_getLogs; если RPC ограничивает диапазон логов,
+        бинарный поиск по ownerOf на исторических блоках (нужен архивный узел).
+        """
+        nft = self.chain.v3_npm if version == 3 else self.chain.v4_posm
+        head = int(self._rpc("eth_blockNumber", []), 16)
+        topics = ["0x" + TRANSFER_TOPIC.hex(), "0x" + word(0), None, "0x" + word(token_id)]
+        if found := self._mint_block_from_logs(nft, topics, head):
+            return found, self.block_timestamp(found)
+
+        def exists(block: int) -> bool:
+            try:
+                return len(str(self._rpc("eth_call", [{"to": nft, "data": calldata("ownerOf(uint256)", token_id)},
+                                                     hex(block)]))) > 2
+            except RuntimeError as e:
+                if "not available" in str(e) or "missing trie" in str(e):
+                    raise RuntimeError("rpc has no archive state and limits eth_getLogs") from e
+                return False          # revert: токена ещё нет (или уже сожжён)
+
+        lo, hi = 0, head
+        while lo < hi:
+            mid = (lo + hi) // 2
+            lo, hi = (lo, mid) if exists(mid) else (mid + 1, hi)
+        return lo, self.block_timestamp(lo)
+
+    def _mint_block_from_logs(self, nft: str, topics: list, head: int,
+                              window: int = 2_000_000, min_window: int = 100_000) -> int | None:
+        """Идём окнами назад от head; при ошибке (лимит диапазона/ответа) окно уменьшается вдвое."""
+        to = head
+        while to > 0:
+            frm = max(0, to - window + 1)
+            try:
+                logs = self._rpc("eth_getLogs", [{"address": nft, "fromBlock": hex(frm), "toBlock": hex(to),
+                                                  "topics": topics}])
+            except RuntimeError:
+                if window <= min_window:
+                    return None          # RPC не тянет логи — пусть работает бинарный поиск
+                window //= 2
+                continue
+            if logs:
+                return int(logs[0]["blockNumber"], 16)
+            to = frm - 1
+        return None
 
     def position(self, version: int, token_id: int) -> Position:
         return self._v3(token_id) if version == 3 else self._v4(token_id)

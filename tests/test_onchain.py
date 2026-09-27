@@ -82,7 +82,7 @@ def test_batch_retries_rate_limit():
 
     r = ChainReader(Network.BASE, client=httpx.Client(transport=httpx.MockTransport(handler)), sleep=sleeps.append)
     assert [words(x)[0] for x in r.batch([("0x1", "0x"), ("0x2", "0x")])] == [0, 1]
-    assert sleeps == [0.5]
+    assert len(sleeps) == 1 and 0.25 <= sleeps[0] <= 0.75     # 0.5с ± jitter
 
 
 def test_batch_chunks_requests():
@@ -126,3 +126,54 @@ def test_view_pnl_from_top_matches_range_math():
     assert v.value_at_top > v.value                   # цена в диапазоне ниже входа → просадка
     assert -0.05 < v.pnl_from_top < 0
     assert isclose(v.value, v.holdings[0] * v.price + v.holdings[1])
+
+
+def _rpc_server(head: int, mint_block: int, logs_limit: int | None = None, archive: bool = True):
+    """Мок RPC: eth_getLogs с лимитом диапазона, ownerOf на исторических блоках, таймстемпы блоков."""
+    def handler(req):
+        body = json.loads(req.content)
+        method, params = body["method"], body["params"]
+
+        def ok(result):
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
+
+        def err(msg):
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": msg}})
+
+        if method == "eth_blockNumber":
+            return ok(hex(head))
+        if method == "eth_getBlockByNumber":
+            return ok({"timestamp": hex(1_000_000 + int(params[0], 16))})
+        if method == "eth_getLogs":
+            frm, to = int(params[0]["fromBlock"], 16), int(params[0]["toBlock"], 16)
+            if logs_limit is not None and to - frm + 1 > logs_limit:
+                return err("block range too large")
+            return ok([{"blockNumber": hex(mint_block)}] if frm <= mint_block <= to else [])
+        if method == "eth_call":
+            if not archive:
+                return err("historical state abc is not available")
+            block = int(params[1], 16)
+            return ok("0x" + word(1)) if block >= mint_block else err("execution reverted: nonexistent token")
+        raise AssertionError(method)
+    return ChainReader(Network.ROBINHOOD, client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+
+def test_minted_at_from_logs_windows():
+    r = _rpc_server(head=10_000_000, mint_block=3_333_333)
+    assert r.minted_at(4, 1) == (3_333_333, 1_000_000 + 3_333_333)
+
+
+def test_minted_at_shrinks_window_on_range_limit():
+    assert _rpc_server(head=1_000_000, mint_block=420_000, logs_limit=500_000).minted_at(4, 1)[0] == 420_000
+
+
+def test_minted_at_falls_back_to_binary_search():
+    # Логи не отдаются даже минимальным окном → бинарный поиск по ownerOf
+    r = _rpc_server(head=1_000_000, mint_block=777_777, logs_limit=10)
+    assert r.minted_at(3, 1)[0] == 777_777
+
+
+def test_minted_at_without_archive_and_logs_fails_clearly():
+    r = _rpc_server(head=1_000_000, mint_block=777_777, logs_limit=10, archive=False)
+    with pytest.raises(RuntimeError, match="no archive"):
+        r.minted_at(4, 1)
