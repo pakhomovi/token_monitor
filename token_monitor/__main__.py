@@ -1,22 +1,34 @@
 import argparse
 import logging
 import sys
+from dataclasses import replace
 
-from .config import load_settings
-from .models import Network
+from .config import Settings, load_settings
+from .models import Network, PoolSnapshot
 from .pipeline import Scored, screen
-from .models import PoolSnapshot
+from .scoring import Params, RangeStress, stress_model
 from .screener import CodexError, CodexScreener, ScreenerQuery, parse_pair
 from .strategy import RangePosition, Shape
 
 
+def _days(d: float) -> str:
+    return f"{d:>5.1f}d" if d < 1e3 else "    ∞"
+
+
 def _row(s: Scored) -> str:
     p, m = s.pool, s.market.metrics
+    covers = (f"cover ¼ {_days(m['cover_25'])} ½ {_days(m['cover_50'])} bottom {_days(m['cover_100'])}  "
+              if "cover_25" in m else "")
     return (f"{s.market.verdict.value.upper():<5} {p.network.value:<9} {p.symbol[:12]:<12} "
             f"{p.exchange[:16]:<16} fee {p.fee_bps:>5.1f}bp  liq ${p.liquidity_usd:>12,.0f}  "
-            f"vol24 ${p.vol_24h_usd:>13,.0f}  "
-            f"y24 {m.get('daily_yield_24h', 0):>6.2%}  pers {m.get('persistence', 0):>5.2f}  "
+            f"vol24 ${p.vol_24h_usd:>13,.0f}  pers {m.get('persistence', 0):>5.2f}  {covers}"
             f"{'; '.join(s.market.reasons)}  {p.address}")
+
+
+def _params(st: Settings, args: argparse.Namespace) -> Params:
+    overrides = {k: v for k, v in (("strategy", args.strategy), ("strategy_depth", args.depth),
+                                   ("strategy_size", args.size)) if v is not None}
+    return replace(st.params, **overrides)
 
 
 def cmd_screen(args: argparse.Namespace) -> int:
@@ -36,7 +48,7 @@ def cmd_screen(args: argparse.Namespace) -> int:
         print(f"codex: {e}", file=sys.stderr)
         return 1
 
-    results = screen(pools, st.params, keep_skipped=args.all)
+    results = screen(pools, _params(st, args), keep_skipped=args.all)
     for s in results:
         print(_row(s))
     print(f"\n{len(results)} of {len(pools)} pools", file=sys.stderr)
@@ -46,15 +58,16 @@ def cmd_screen(args: argparse.Namespace) -> int:
 def _strategy_table(pos: RangePosition, p: PoolSnapshot) -> str:
     lines = [f"\n{pos.shape.value} -{pos.depth:.0%} ${pos.size:,.0f} → {p.address[:12]}… "
              f"fee {p.fee_bps:.0f}bp  liq ${p.liquidity_usd:,.0f}  vol24 ${p.vol_24h_usd:,.0f}",
-             "  price  in token  avg entry  pos PnL  fees/day  cover PnL"]
-    levels = sorted({0.1, 0.2, 0.3, 0.5, pos.depth, min(pos.depth + 0.1, 0.95)})
-    for drop in levels:
+             "  scenario     price  in token  avg entry  pos PnL  fees/day  cover PnL"]
+    scenarios = [("¼ range", 0.25), ("½ range", 0.5), ("bottom", 1.0), ("below", None)]
+    for name, fraction in scenarios:
+        drop = pos.depth * fraction if fraction else min(pos.depth + 0.1, 0.95)
         price = 1 - drop
         s = pos.state(price)
         pnl = s.value / pos.size - 1
         y = pos.daily_fee_yield(price, p.fee_bps, p.vol_24h_usd, p.liquidity_usd)
-        cover = f"{-pnl / y:>6.1f}d" if y > 0 else "   out"
-        lines.append(f"  {-drop:>+5.0%}  {s.token_share:>7.0%}  {s.avg_entry - 1:>+8.0%}  "
+        cover = _days(-pnl / y) if y > 0 else "  out"
+        lines.append(f"  {name:<10} {-drop:>+6.0%}  {s.token_share:>7.0%}  {s.avg_entry - 1:>+8.0%}  "
                      f"{pnl:>+7.1%}  {y:>7.2%}  {cover}")
     return "\n".join(lines)
 
@@ -98,7 +111,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     print()
 
     # Для ручного анализа важнее, где лежит ликвидность, чем порядок по вердикту
-    results = sorted(screen([p for _, p in parsed], st.params, keep_skipped=True),
+    cfg = _params(st, args)
+    results = sorted(screen([p for _, p in parsed], cfg, keep_skipped=True),
                      key=lambda s: -s.pool.liquidity_usd)
     shown, hidden = results[:args.top], results[args.top:]
     for s in shown:
@@ -108,11 +122,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
               f"vol24 ${sum(s.pool.vol_24h_usd for s in hidden):,.0f} (--top {len(results)} to show)")
     total_liq = sum(s.pool.liquidity_usd for s in results)
     total_vol = sum(s.pool.vol_24h_usd for s in results)
-    if args.strategy:
+    model = stress_model(cfg)
+    if args.scenarios and isinstance(model, RangeStress):
         # PnL позиции зависит только от текущей цены: откат = подъём по той же таблице
-        pos = RangePosition(args.size, args.depth, Shape(args.strategy))
-        for s in [s for s in results if s.pool.fee_bps > 0][:args.strategy_pools]:
-            print(_strategy_table(pos, s.pool))
+        for s in [s for s in results if s.pool.fee_bps > 0][:args.scenarios]:
+            print(_strategy_table(model.pos, s.pool))
     print(f"\ntotal: liq ${total_liq:,.0f}, vol24 ${total_vol:,.0f}, "
           f"top pool holds {results[0].pool.liquidity_usd / total_liq:.0%} of liquidity" if total_liq else "")
     return 0
@@ -122,20 +136,22 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="token_monitor")
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sc = sub.add_parser("screen", help="top-N пулов из Codex → FAST/SLOW")
+    strat = argparse.ArgumentParser(add_help=False)
+    strat.add_argument("--strategy", choices=[*(s.value for s in Shape), "fullrange"],
+                       help="модель входа (override PARAM_STRATEGY)")
+    strat.add_argument("--depth", type=float, help="глубина диапазона: 0.7 = до -70%%")
+    strat.add_argument("--size", type=float, help="размер позиции, $")
+    sc = sub.add_parser("screen", parents=[strat], help="top-N пулов из Codex → FAST/SLOW")
     sc.add_argument("--limit", type=int, help="override SCREEN_LIMIT")
     sc.add_argument("--all", action="store_true", help="показывать и SKIP")
     sc.set_defaults(func=cmd_screen)
-    an = sub.add_parser("analyze", help="все пулы токена → FAST/SLOW/SKIP + риск Codex")
+    an = sub.add_parser("analyze", parents=[strat], help="все пулы токена → FAST/SLOW/SKIP + риск Codex")
     an.add_argument("token", help="адрес токена")
     an.add_argument("--network", choices=[n.value for n in Network])
     an.add_argument("--min-liq", type=float, default=1_000, help="нижняя граница ликвидности пула, $")
     an.add_argument("--top", type=int, default=10, help="сколько пулов показать (по ликвидности)")
-    an.add_argument("--strategy", choices=[s.value for s in Shape],
-                    help="сценарии для позиции ниже цены: spot или bidask")
-    an.add_argument("--depth", type=float, default=0.7, help="глубина диапазона: 0.7 = до -70%%")
-    an.add_argument("--size", type=float, default=1000, help="размер позиции в $")
-    an.add_argument("--strategy-pools", type=int, default=2, help="для скольких крупнейших пулов")
+    an.add_argument("--scenarios", type=int, default=0, metavar="N",
+                    help="подробные сценарии для N крупнейших пулов")
     an.set_defaults(func=cmd_analyze)
 
     args = ap.parse_args(argv)

@@ -192,3 +192,15 @@ def test_analyze_marks_unanalyzed_risk(monkeypatch, capsys):
 def test_resolve_fee_bps(override, expected):
     from token_monitor.screener import resolve_fee_bps
     assert resolve_fee_bps(row(**override)) == expected
+
+
+def test_cli_strategy_override(monkeypatch, capsys):
+    from token_monitor import __main__ as cli
+
+    monkeypatch.setenv("CODEX_API_KEY", "k")
+    monkeypatch.setattr(CodexScreener, "fetch_rows", lambda self, q: [{**row(), "riskCoverage": "ANALYZED"}])
+    assert cli.main(["analyze", "0xTOKEN", "--strategy", "bidask", "--depth", "0.6", "--scenarios", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "cover ¼" in out and "bidask -60% $1,000" in out
+    for scenario in ("¼ range", "½ range", "bottom", "below"):
+        assert scenario in out

@@ -4,7 +4,9 @@ from math import isclose, sqrt
 import pytest
 
 from token_monitor.models import Network, PoolSnapshot, SecurityInfo, Verdict
-from token_monitor.scoring import Params, activity_flags, classify_market, daily_yield, security_flags, stress_loss
+from token_monitor.scoring import (FullRangeStress, Params, RangeStress, activity_flags, classify_market,
+                                   daily_yield, security_flags, stress_loss, stress_model)
+from token_monitor.strategy import Shape
 
 
 def pool(**kw) -> PoolSnapshot:
@@ -13,6 +15,9 @@ def pool(**kw) -> PoolSnapshot:
         fee_bps=100, liquidity_usd=100_000, vol_1h_usd=0, vol_24h_usd=0,
     )
     return PoolSnapshot(**{**base, **kw})
+
+
+FR = Params(strategy="fullrange")   # классическая full-range модель
 
 
 CLEAN = SecurityInfo(honeypot=False, buy_tax=0.0, sell_tax=0.01, top10_share=0.2,
@@ -30,33 +35,33 @@ def test_daily_yield_handles_zero_liquidity():
 
 
 def test_low_liquidity_is_skipped():
-    r = classify_market(pool(liquidity_usd=10_000, vol_1h_usd=1e6, vol_24h_usd=1e7))
+    r = classify_market(pool(liquidity_usd=10_000, vol_1h_usd=1e6, vol_24h_usd=1e7), FR)
     assert r.verdict is Verdict.SKIP
     assert "liquidity" in r.reasons[0]
 
 
 def test_stable_volume_is_slow():
     # 1% fee, 240k/24h на 100k ликвидности → 2.4%/день; loss(-30%) ≈ 16.3% → ~6.8 дня
-    r = classify_market(pool(vol_1h_usd=10_000, vol_24h_usd=240_000))
+    r = classify_market(pool(vol_1h_usd=10_000, vol_24h_usd=240_000), FR)
     assert r.verdict is Verdict.SLOW
     assert r.metrics["breakeven_days"] < 7
 
 
 def test_spike_is_fast_not_slow():
     # Последний час в ~19 раз выше среднего за сутки: всплеск, а не стабильный поток комиссий
-    r = classify_market(pool(vol_1h_usd=200_000, vol_24h_usd=250_000))
+    r = classify_market(pool(vol_1h_usd=200_000, vol_24h_usd=250_000), FR)
     assert r.metrics["persistence"] > Params().max_persistence
     assert r.verdict is Verdict.FAST
 
 
 def test_fading_volume_is_not_slow():
     # 24ч объём высокий, но активность затухла (последний час почти ноль)
-    r = classify_market(pool(vol_1h_usd=100, vol_24h_usd=2_000_000))
+    r = classify_market(pool(vol_1h_usd=100, vol_24h_usd=2_000_000), FR)
     assert r.verdict is Verdict.SKIP
 
 
 def test_dead_pool_is_skipped():
-    r = classify_market(pool(vol_1h_usd=0, vol_24h_usd=0))
+    r = classify_market(pool(vol_1h_usd=0, vol_24h_usd=0), FR)
     assert r.verdict is Verdict.SKIP
 
 
@@ -86,7 +91,7 @@ ORGANIC = dict(vol_1h_usd=10_000, vol_24h_usd=240_000, txns_24h=2_000, unique_wa
 
 
 def test_organic_activity_keeps_verdict():
-    assert classify_market(pool(**ORGANIC)).verdict is Verdict.SLOW
+    assert classify_market(pool(**ORGANIC), FR).verdict is Verdict.SLOW
 
 
 @pytest.mark.parametrize("override,reason", [
@@ -96,7 +101,7 @@ def test_organic_activity_keeps_verdict():
     ({"fresh_wallet_share": 0.99}, "99% swaps from <1d wallets"),
 ])
 def test_wash_volume_is_skipped(override, reason):
-    r = classify_market(pool(**{**ORGANIC, **override}))
+    r = classify_market(pool(**{**ORGANIC, **override}), FR)
     assert r.verdict is Verdict.SKIP
     assert r.reasons[0].startswith("wash:") and reason in r.reasons[0]
     assert r.metrics["breakeven_days"] < 7          # математика посчитана, отсекло именно качество объёма
@@ -112,17 +117,58 @@ def test_dead_pool_is_not_flagged_for_few_wallets():
 
 def test_low_liquidity_still_reports_metrics_and_would_be_verdict():
     # Кейс HADES: $21k ликвидности, 6% fee — математика проходит, отсекает только порог
-    r = classify_market(pool(liquidity_usd=21_314, fee_bps=600, vol_1h_usd=1_817, vol_24h_usd=48_463))
+    r = classify_market(pool(liquidity_usd=21_314, fee_bps=600, vol_1h_usd=1_817, vol_24h_usd=48_463), FR)
     assert r.verdict is Verdict.SKIP
     assert r.reasons[0].startswith("liquidity <") and r.reasons[1].startswith("else SLOW")
     assert isclose(r.metrics["daily_yield_24h"], 0.06 * 48_463 / 21_314)
 
 
 def test_dead_pool_with_few_wallets_is_not_wash():
-    r = classify_market(pool(vol_24h_usd=5, unique_wallets_24h=7))
+    r = classify_market(pool(vol_24h_usd=5, unique_wallets_24h=7), FR)
     assert not r.reasons[0].startswith("wash")
 
 
 def test_zero_fee_hook_pool_is_skipped():
-    r = classify_market(pool(fee_bps=0, **ORGANIC))
+    r = classify_market(pool(fee_bps=0, **ORGANIC), FR)
     assert r.verdict is Verdict.SKIP and r.reasons == ["no LP fee (hook pool)"]
+
+
+# --- Модель входа ниже цены: решают ¼ и ½ диапазона, дно — только метрика ---
+
+SPOT = Params(strategy="spot", strategy_depth=0.7, strategy_size=1000)
+
+
+def test_stress_model_factory():
+    assert isinstance(stress_model(FR), FullRangeStress)
+    m = stress_model(Params(strategy="bidask", strategy_depth=0.6, strategy_size=500))
+    assert isinstance(m, RangeStress) and m.pos.shape is Shape.BIDASK and m.label == "bidask -60%"
+
+
+def test_range_breakeven_is_worst_of_quarter_and_half():
+    r = classify_market(pool(**ORGANIC), SPOT)
+    m = r.metrics
+    assert m["breakeven_days"] == max(m["cover_25"], m["cover_50"])
+    assert m["cover_25"] < m["cover_50"] < m["cover_100"]       # чем глубже, тем дольше покрывать
+
+
+def test_bottom_scenario_does_not_decide_verdict():
+    # Подбираем объём так, чтобы ½ диапазона укладывалась в горизонт, а дно — нет
+    model = stress_model(SPOT)
+    p = next(pool(vol_1h_usd=v / 24, vol_24h_usd=v, txns_24h=2_000, unique_wallets_24h=500,
+                  fresh_wallet_share=0.05)
+             for v in range(1_000, 500_000, 1_000)
+             if model.breakeven(pool(vol_24h_usd=v), v)[0] <= SPOT.slow_horizon_days)
+    r = classify_market(p, SPOT)
+    assert r.metrics["cover_100"] > SPOT.slow_horizon_days
+    assert r.verdict is Verdict.SLOW
+
+
+def test_skip_reason_names_strategy():
+    r = classify_market(pool(vol_1h_usd=10, vol_24h_usd=240), SPOT)
+    assert r.verdict is Verdict.SKIP and "spot -70%" in r.reasons[0]
+
+
+def test_unstable_volume_reason_is_explicit():
+    # Комиссий хватает по 24ч, но последний час затих: отсекает persistence, а не доходность
+    r = classify_market(pool(**{**ORGANIC, "vol_1h_usd": 2_000}), SPOT)
+    assert r.verdict is Verdict.SKIP and r.reasons[0].startswith("unstable volume: persistence 0.20")

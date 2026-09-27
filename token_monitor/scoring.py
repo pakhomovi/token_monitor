@@ -1,8 +1,9 @@
 from dataclasses import dataclass, field
 from math import inf, sqrt
-from typing import Callable
+from typing import Callable, Protocol
 
 from .models import PoolSnapshot, SecurityInfo, Verdict
+from .strategy import RangePosition, Shape
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +21,10 @@ class Params:
     max_trade_share: float = 0.05    # средняя сделка / ликвидность пула
     min_unique_wallets: int = 50     # уникальных кошельков за 24ч
     max_fresh_wallets: float = 0.5   # доля свопов с кошельков моложе суток
+    # Модель входа: spot/bidask — позиция ниже цены, fullrange — классический full-range LP
+    strategy: str = "spot"
+    strategy_depth: float = 0.7      # диапазон до -70%
+    strategy_size: float = 1000      # размер позиции, $
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,31 +57,77 @@ def activity_flags(p: PoolSnapshot, cfg: Params = Params()) -> list[str]:
     return flags
 
 
-def classify_market(p: PoolSnapshot, cfg: Params = Params()) -> MarketResult:
+class StressModel(Protocol):
+    """Сколько дней комиссии должны капать, чтобы покрыть потерю позиции в стресс-сценарии."""
+
+    label: str
+
+    def breakeven(self, p: PoolSnapshot, daily_volume: float) -> tuple[float, dict[str, float]]: ...
+
+
+class FullRangeStress:
+    def __init__(self, drop: float):
+        self.loss = stress_loss(drop)
+        self.label = f"full-range -{drop:.0%}"
+
+    def breakeven(self, p: PoolSnapshot, daily_volume: float) -> tuple[float, dict[str, float]]:
+        y = daily_yield(p.fee_bps, daily_volume, p.liquidity_usd)
+        return (self.loss / y if y > 0 else inf), {}
+
+
+class RangeStress:
+    """Позиция ниже цены. Решают вероятные сценарии (падение на ¼ и ½ диапазона),
+    дно диапазона — маловероятно, считается только как метрика для сравнения пулов."""
+
+    DECISIVE = (0.25, 0.5)
+    REFERENCE = 1.0
+
+    def __init__(self, position: RangePosition):
+        self.pos = position
+        self.label = f"{position.shape.value} -{position.depth:.0%}"
+
+    def cover_days(self, p: PoolSnapshot, daily_volume: float, fraction: float) -> float:
+        price = 1 - self.pos.depth * fraction
+        loss = 1 - self.pos.state(price).value / self.pos.size
+        y = self.pos.daily_fee_yield(price, p.fee_bps, daily_volume, p.liquidity_usd)
+        return loss / y if y > 0 else inf
+
+    def breakeven(self, p: PoolSnapshot, daily_volume: float) -> tuple[float, dict[str, float]]:
+        covers = {f: self.cover_days(p, daily_volume, f) for f in (*self.DECISIVE, self.REFERENCE)}
+        extra = {f"cover_{int(f * 100)}": d for f, d in covers.items()}
+        return max(covers[f] for f in self.DECISIVE), extra
+
+
+def stress_model(cfg: Params) -> StressModel:
+    if cfg.strategy == "fullrange":
+        return FullRangeStress(cfg.stress_drop)
+    return RangeStress(RangePosition(cfg.strategy_size, cfg.strategy_depth, Shape(cfg.strategy)))
+
+
+def classify_market(p: PoolSnapshot, cfg: Params = Params(),
+                    model: StressModel | None = None) -> MarketResult:
     """Этап 2 воронки: только рыночная математика, без сетевых запросов.
 
     Метрики считаются всегда, даже для отсеянных пулов, чтобы при ручном анализе было видно,
-    что именно отсекло пул.
+    что именно отсекло пул. model передаётся снаружи, чтобы не пересобирать позицию на каждый пул.
     """
     if p.fee_bps <= 0:
         # v4-пулы лаунчпадов: комиссию забирает хук, LP не получает ничего
         return MarketResult(Verdict.SKIP, ["no LP fee (hook pool)"])
 
-    loss = stress_loss(cfg.stress_drop)
-    y_24h = daily_yield(p.fee_bps, p.vol_24h_usd, p.liquidity_usd)
-    y_now = daily_yield(p.fee_bps, p.vol_1h_usd * 24, p.liquidity_usd)
+    model = model or stress_model(cfg)
     persistence = p.vol_1h_usd * 24 / p.vol_24h_usd if p.vol_24h_usd > 0 else 0.0
-
-    # Сколько времени комиссии должны капать, чтобы покрыть стресс-падение
-    be_days = loss / y_24h if y_24h > 0 else inf
-    be_hours_now = loss / y_now * 24 if y_now > 0 else inf
+    be_days, extra = model.breakeven(p, p.vol_24h_usd)
+    be_days_now, _ = model.breakeven(p, p.vol_1h_usd * 24)
+    be_hours_now = be_days_now * 24
 
     metrics = {
-        "daily_yield_24h": y_24h,
-        "daily_yield_now": y_now,
+        "daily_yield_24h": daily_yield(p.fee_bps, p.vol_24h_usd, p.liquidity_usd),
+        "daily_yield_now": daily_yield(p.fee_bps, p.vol_1h_usd * 24, p.liquidity_usd),
         "persistence": persistence,
         "breakeven_days": be_days,
         "breakeven_hours_now": be_hours_now,
+        **extra,
     }
 
     stable = cfg.min_persistence <= persistence <= cfg.max_persistence
@@ -84,8 +135,12 @@ def classify_market(p: PoolSnapshot, cfg: Params = Params()) -> MarketResult:
         verdict, reason = Verdict.SLOW, f"breakeven {be_days:.1f}d, persistence {persistence:.2f}"
     elif be_hours_now <= cfg.fast_horizon_hours:
         verdict, reason = Verdict.FAST, f"hot now: breakeven {be_hours_now:.1f}h"
+    elif be_days <= cfg.slow_horizon_days:
+        # Комиссий хватает, но объём нестабилен: на него нельзя опираться весь горизонт
+        return MarketResult(Verdict.SKIP, [f"unstable volume: persistence {persistence:.2f}, "
+                                           f"breakeven {be_days:.1f}d"], metrics)
     else:
-        return MarketResult(Verdict.SKIP, [f"fees don't cover -{cfg.stress_drop:.0%} within horizon"], metrics)
+        return MarketResult(Verdict.SKIP, [f"fees don't cover {model.label} within horizon"], metrics)
 
     # Гейты применяются только к пулам, прошедшим математику: мёртвый пул — не wash
     if p.liquidity_usd < cfg.min_liquidity:

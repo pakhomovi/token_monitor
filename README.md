@@ -13,7 +13,15 @@
 ## Логика вердикта
 
 Решение принимается не по APR, а по времени, за которое комиссии покрывают
-потерю LP-позиции при стресс-падении цены (full-range: `1 − √(1 − drop)`).
+потерю LP-позиции в стресс-сценарии. Модель задаётся `PARAM_STRATEGY`:
+
+- `spot` / `bidask` (по умолчанию `spot`, диапазон `PARAM_STRATEGY_DEPTH`, размер
+  `PARAM_STRATEGY_SIZE`): позиция ниже цены. Вердикт решают вероятные сценарии —
+  падение на **¼ и ½ диапазона** (берётся худший). **Дно диапазона** маловероятно и
+  на вердикт не влияет, но выводится (`cover bottom`) и используется для сортировки
+  как метрика сравнения пулов.
+- `fullrange`: классическая full-range позиция при падении на `PARAM_STRESS_DROP`
+  (`1 − √(1 − drop)`).
 
 - **SLOW**: объём стабилен (`min_persistence ≤ vol_1h·24 / vol_24h ≤ max_persistence`),
   и комиссии за 24ч покрывают стресс за `slow_horizon_days`.
@@ -51,8 +59,9 @@ Screener берёт `CODEX_API_KEY`, `SCREEN_LIMIT` (≤ 200), `SCREEN_RANK_BY`,
 ## Сценарии LP-стратегий
 
 ```bash
-python -m token_monitor analyze <CA> --strategy spot   --depth 0.7 --size 1000
-python -m token_monitor analyze <CA> --strategy bidask --depth 0.7 --size 1000
+python -m token_monitor analyze <CA> --strategy spot   --depth 0.7 --size 1000 --scenarios 2
+python -m token_monitor analyze <CA> --strategy bidask --depth 0.7 --size 1500 --scenarios 2
+python -m token_monitor screen --strategy bidask
 ```
 
 Позиция в quote (ETH/BNB/USD) в диапазоне от цены входа до −depth: `spot` — равный капитал
