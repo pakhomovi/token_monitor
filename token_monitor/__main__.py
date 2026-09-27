@@ -6,7 +6,7 @@ from dataclasses import replace
 from .config import Settings, load_settings
 from .models import Network, PoolSnapshot
 from .pipeline import Scored, screen
-from .scoring import Params, RangeStress, stress_model
+from .scoring import Params, RangeStress, min_fee_for, stress_model
 from .screener import CodexError, CodexScreener, ScreenerQuery, parse_pair
 from .strategy import RangePosition, Shape
 
@@ -127,7 +127,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     model = stress_model(cfg)
     if args.scenarios and isinstance(model, RangeStress):
         # PnL позиции зависит только от текущей цены: откат = подъём по той же таблице
-        for s in [s for s in results if s.pool.fee_bps > 0][:args.scenarios]:
+        # Сценарии только для пулов, проходящих порог комиссии своей версии
+        for s in [s for s in results if s.pool.fee_bps >= min_fee_for(s.pool, cfg)][:args.scenarios]:
             print(_strategy_table(model.pos, s.pool))
     print(f"\ntotal: liq ${total_liq:,.0f}, vol24 ${total_vol:,.0f}, "
           f"top pool makes {results[0].pool.vol_24h_usd / total_vol:.0%} of volume" if total_vol else "")
