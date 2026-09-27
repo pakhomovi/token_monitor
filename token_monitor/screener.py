@@ -21,10 +21,7 @@ _NETWORK_BY_ID = {v: k for k, v in NETWORK_IDS.items()}
 RANK_ATTRIBUTES = frozenset({"volumeUSD1", "volumeUSD4", "volumeUSD12", "volumeUSD24", "liquidity",
                              "trendingScore1", "trendingScore24", "poolFeeBps"})
 
-QUERY = """
-query Screen($filters: PairFilters, $rankings: [PairRanking], $limit: Int) {
-  filterPairs(filters: $filters, rankings: $rankings, limit: $limit) {
-    results {
+_RESULT_FIELDS = """
       pair { address networkId token0 token1 fee protocol }
       token0 { symbol }
       token1 { symbol }
@@ -43,7 +40,20 @@ query Screen($filters: PairFilters, $rankings: [PairRanking], $limit: Int) {
       riskVerdict
       riskScore
       riskReasons
-    }
+"""
+
+QUERY = """
+query Screen($filters: PairFilters, $rankings: [PairRanking], $limit: Int) {
+  filterPairs(filters: $filters, rankings: $rankings, limit: $limit) {
+    results {""" + _RESULT_FIELDS + """    }
+  }
+}
+"""
+
+PAIRS_QUERY = """
+query Pairs($pairs: [String], $limit: Int) {
+  filterPairs(pairs: $pairs, limit: $limit) {
+    results {""" + _RESULT_FIELDS + """    }
   }
 }
 """
@@ -219,6 +229,20 @@ class CodexScreener:
         if len(pools) < len(rows):
             log.info("screener: dropped %d of %d rows without fee/liquidity", len(rows) - len(pools), len(rows))
         return pools
+
+    def token_prices(self, tokens: list[tuple[str, Network]], timestamp: int | None = None) -> dict[str, float]:
+        """USD-цены токенов (адрес в нижнем регистре → цена); timestamp — цена на момент в прошлом."""
+        inputs = [{"address": a, "networkId": NETWORK_IDS[n], **({"timestamp": timestamp} if timestamp else {})}
+                  for a, n in tokens]
+        data = self._request({"query": "query($i:[GetPriceInput]){getTokenPrices(inputs:$i){address priceUsd}}",
+                              "variables": {"i": inputs}})
+        return {p["address"].lower(): p["priceUsd"] for p in data.get("getTokenPrices") or [] if p}
+
+    def pairs(self, pools: list[tuple[str, Network]]) -> list[dict[str, Any]]:
+        """Метрики конкретных пулов (v3 — адрес, v4 — poolId)."""
+        data = self._request({"query": PAIRS_QUERY,
+                              "variables": {"pairs": [f"{a}:{NETWORK_IDS[n]}" for a, n in pools], "limit": len(pools)}})
+        return [r for r in (data.get("filterPairs") or {}).get("results") or [] if r]
 
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
         for attempt in range(self._max_retries + 1):

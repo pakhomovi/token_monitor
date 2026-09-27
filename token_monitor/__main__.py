@@ -8,6 +8,8 @@ from .models import Network, PoolSnapshot
 from .pipeline import Scored, screen
 from .scoring import Params, RangeStress, min_fee_for, stress_model
 from .screener import CodexError, CodexScreener, ScreenerQuery, parse_pair
+from .onchain import ChainReader, parse_position_url
+from .positions import PositionView
 from .strategy import RangePosition, Shape
 
 
@@ -135,6 +137,65 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _num(x: float) -> str:
+    # Мемы стоят 1e-6 ETH и дешевле: значащие цифры важнее фиксированных знаков
+    return f"{x:,.2f}" if abs(x) >= 100 else f"{x:.4g}"
+
+
+def _position_report(v: PositionView, usd: float | None, vol24: float | None) -> str:
+    p, t, q = v.pos, v.target, v.quote
+    lo, hi = v.range
+    where = ("выше диапазона" if v.from_top > 0 else "ниже диапазона" if not p.in_range else "в диапазоне")
+    q_usd = usd / v.price if usd else None                  # цена quote в $ через цену токена
+
+    def money(amount_q: float) -> str:
+        return f"{_num(amount_q)} {q.symbol}" + (f" (${amount_q * q_usd:,.2f})" if q_usd else "")
+
+    ht, hq = v.holdings
+    ft, fq = v.fees
+    lines = [
+        f"#{p.token_id} {p.network.value} v{p.version} {t.symbol}/{q.symbol} {p.fee_bps / 100:g}%  pool {p.pool[:12]}…",
+        f"  диапазон  {_num(lo)} … {_num(hi)} {q.symbol} (глубина -{v.depth:.0%})",
+        f"  цена      {_num(v.price)} {q.symbol}: {v.from_top:+.1%} от верхней границы, {where}",
+        f"  состав    {_num(ht)} {t.symbol} + {_num(hq)} {q.symbol} = {money(v.value)}, в токене {v.token_share:.0%}",
+        f"  PnL       {v.pnl_from_top:+.1%} без комиссий (если вход был на верхней границе: {money(v.value_at_top)})",
+        f"  комиссии  {_num(ft)} {t.symbol} + {_num(fq)} {q.symbol} = {money(v.fees_value)} "
+        f"({v.fees_value / v.value_at_top:.1%} от входа)" if v.value_at_top else "",
+    ]
+    share = p.fee_share
+    if p.in_range and vol24:
+        per_day = p.fee_bps / 1e4 * vol24 * share
+        lines.append(f"  доля      {share:.2%} активной ликвидности → ~${per_day:,.2f}/день при vol24 ${vol24:,.0f}"
+                     + (f" ({per_day / (v.value_at_top * q_usd):.1%} от входа)" if q_usd and v.value_at_top else ""))
+    else:
+        lines.append(f"  доля      {share:.2%} активной ликвидности" + ("" if p.in_range else " (вне диапазона: 0)"))
+    return "\n".join(l for l in lines if l)
+
+
+def cmd_position(args: argparse.Namespace) -> int:
+    st = load_settings()
+    refs = [parse_position_url(u) for u in args.urls]
+    views: list[PositionView] = []
+    for network in dict.fromkeys(n for n, _, _ in refs):
+        with ChainReader(network) as reader:
+            views += [PositionView(reader.position(v, i)) for n, v, i in refs if n == network]
+
+    usd: dict[str, float] = {}
+    vols: dict[str, float] = {}
+    if st.codex_api_key:
+        try:
+            with CodexScreener(st.codex_api_key) as codex:
+                usd = codex.token_prices([(v.target.address, v.pos.network) for v in views])
+                for row in codex.pairs(list({(v.pos.pool, v.pos.network) for v in views})):
+                    vols[row["pair"]["address"].lower()] = float(row.get("volumeUSD24") or 0)
+        except CodexError as e:
+            print(f"codex: {e} (без $-оценок)", file=sys.stderr)
+
+    for v in views:
+        print(_position_report(v, usd.get(v.target.address.lower()), vols.get(v.pos.pool.lower())), end="\n\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="token_monitor")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -156,6 +217,10 @@ def main(argv: list[str] | None = None) -> int:
     an.add_argument("--scenarios", type=int, default=0, metavar="N",
                     help="подробные сценарии для N самых торгуемых пулов")
     an.set_defaults(func=cmd_analyze)
+
+    po = sub.add_parser("position", help="LP-позиции Uniswap по ссылкам app.uniswap.org/positions/...")
+    po.add_argument("urls", nargs="+")
+    po.set_defaults(func=cmd_position)
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
