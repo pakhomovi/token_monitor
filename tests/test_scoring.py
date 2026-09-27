@@ -18,7 +18,7 @@ def pool(**kw) -> PoolSnapshot:
     return PoolSnapshot(**{**base, **kw})
 
 
-FR = Params(strategy="fullrange")   # классическая full-range модель
+FR = Params(strategy="fullrange", min_liquidity=50_000, min_fee_bps=0)   # классическая full-range модель
 
 
 CLEAN = SecurityInfo(honeypot=False, buy_tax=0.0, sell_tax=0.01, top10_share=0.2,
@@ -136,7 +136,7 @@ def test_zero_fee_hook_pool_is_skipped():
 
 # --- Модель входа ниже цены: решают ¼ и ½ диапазона, дно — только метрика ---
 
-SPOT = Params(strategy="spot", strategy_depth=0.7, strategy_size=1000)
+SPOT = Params(strategy="spot", strategy_depth=0.7, strategy_size=1000, min_fee_bps=0)
 
 
 def test_stress_model_factory():
@@ -186,3 +186,15 @@ def test_persistence_uses_4h_window():
     assert isclose(persistence_ratio(p), 40_258 * 6 / 241_656)
     assert persistence_ratio(replace(p, vol_4h_usd=None)) == 5_504 * 24 / 241_656   # fallback на 1ч
     assert persistence_ratio(pool(vol_24h_usd=0)) == 0
+
+
+def test_fee_below_one_percent_is_skipped_with_would_be_verdict():
+    # Объём ×10, чтобы 0.3% проходил математику и отсекал именно порог комиссии
+    r = classify_market(pool(**{**ORGANIC, "fee_bps": 30, "vol_1h_usd": 100_000, "vol_24h_usd": 2_400_000}), Params())
+    assert r.verdict is Verdict.SKIP and r.reasons[0] == "fee 0.3% < 1%" and r.reasons[1].startswith("else")
+
+
+def test_defaults_target_small_one_percent_pools():
+    p = Params()
+    assert (p.min_liquidity, p.min_fee_bps) == (10_000, 100)
+    assert classify_market(pool(**{**ORGANIC, "liquidity_usd": 12_000}), p).verdict is not Verdict.SKIP

@@ -18,7 +18,6 @@ class Settings:
     screen_limit: int
     screen_rank_by: str
     screen_min_volume_24h: float
-    screen_min_fee_bps: float
     telegram_token: str | None
     telegram_chat_id: str | None
     ollama_url: str
@@ -58,7 +57,6 @@ def load_settings(env_file: str | Path | None = ".env") -> Settings:
         screen_limit=int(env.get("SCREEN_LIMIT", "50")),
         screen_rank_by=env.get("SCREEN_RANK_BY", "volumeUSD24"),
         screen_min_volume_24h=float(env.get("SCREEN_MIN_VOLUME_24H", "0")),
-        screen_min_fee_bps=float(env.get("SCREEN_MIN_FEE_BPS", "10")),
         telegram_token=env.get("TELEGRAM_BOT_TOKEN") or None,
         telegram_chat_id=env.get("TELEGRAM_CHAT_ID") or None,
         ollama_url=env.get("OLLAMA_URL", "http://localhost:11434").rstrip("/"),

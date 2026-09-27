@@ -56,9 +56,9 @@ class CodexError(RuntimeError):
 class ScreenerQuery:
     networks: tuple[Network, ...]
     limit: int = 50                  # filterPairs отдаёт максимум 200 за запрос
-    min_liquidity: float = 50_000
+    min_liquidity: float = 10_000
     min_volume_24h: float = 0
-    min_fee_bps: float = 0           # отсекает 1bp стейбл/мажор-пулы, забивающие top-N
+    min_fee_bps: float = 0           # по poolFeeBps: без него top-N забивают 1bp мажор-пулы
     rank_by: str = "volumeUSD24"
     exclude_scam: bool = True        # бесплатный пре-фильтр Codex, полноценный security — этап 3
     tokens: tuple[str, ...] = ()     # анализ конкретных токенов вместо общего скрининга

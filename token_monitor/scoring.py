@@ -8,7 +8,8 @@ from .strategy import RangePosition, Shape
 
 @dataclass(frozen=True, slots=True)
 class Params:
-    min_liquidity: float = 50_000
+    min_liquidity: float = 10_000    # позиции $300–1500: мелкий пул с большим объёмом рядом с крупным
+    min_fee_bps: float = 100         # целевые пулы — 1% v3/v4, ниже комиссий не хватает
     max_tax: float = 0.05
     max_top10: float = 0.35
     stress_drop: float = 0.30        # стресс-сценарий: цена токена -30%
@@ -157,9 +158,10 @@ def classify_market(p: PoolSnapshot, cfg: Params = Params(),
         return MarketResult(Verdict.SKIP, [f"fees don't cover {model.label} within horizon"], metrics)
 
     # Гейты применяются только к пулам, прошедшим математику: мёртвый пул — не wash
-    if p.liquidity_usd < cfg.min_liquidity:
-        return MarketResult(Verdict.SKIP, [f"liquidity < ${cfg.min_liquidity:,.0f}",
-                                           f"else {verdict.value.upper()}: {reason}"], metrics)
+    gate = (f"fee {p.fee_bps / 100:g}% < {cfg.min_fee_bps / 100:g}%" if p.fee_bps < cfg.min_fee_bps else
+            f"liquidity < ${cfg.min_liquidity:,.0f}" if p.liquidity_usd < cfg.min_liquidity else None)
+    if gate:
+        return MarketResult(Verdict.SKIP, [gate, f"else {verdict.value.upper()}: {reason}"], metrics)
     if wash := activity_flags(p, cfg):
         return MarketResult(Verdict.SKIP, [f"wash: {'; '.join(wash)}"], metrics)
     return MarketResult(verdict, [reason], metrics)

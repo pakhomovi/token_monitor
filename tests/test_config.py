@@ -6,7 +6,7 @@ def test_param_overrides_are_typed():
     p = load_params({"PARAM_MAX_TAX": "0.03", "PARAM_STRICT_UNKNOWN": "false"})
     assert p.max_tax == 0.03
     assert p.strict_unknown is False
-    assert p.min_liquidity == 50_000            # не переопределённое остаётся дефолтом
+    assert p.min_liquidity == 10_000            # не переопределённое остаётся дефолтом
 
 
 def test_settings_from_env(monkeypatch):
