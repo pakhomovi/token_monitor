@@ -5,7 +5,9 @@ import sys
 from .config import load_settings
 from .models import Network
 from .pipeline import Scored, screen
+from .models import PoolSnapshot
 from .screener import CodexError, CodexScreener, ScreenerQuery, parse_pair
+from .strategy import RangePosition, Shape
 
 
 def _row(s: Scored) -> str:
@@ -39,6 +41,22 @@ def cmd_screen(args: argparse.Namespace) -> int:
         print(_row(s))
     print(f"\n{len(results)} of {len(pools)} pools", file=sys.stderr)
     return 0
+
+
+def _strategy_table(pos: RangePosition, p: PoolSnapshot) -> str:
+    lines = [f"\n{pos.shape.value} -{pos.depth:.0%} ${pos.size:,.0f} → {p.address[:12]}… "
+             f"fee {p.fee_bps:.0f}bp  liq ${p.liquidity_usd:,.0f}  vol24 ${p.vol_24h_usd:,.0f}",
+             "  price  in token  avg entry  pos PnL  fees/day  cover PnL"]
+    levels = sorted({0.1, 0.2, 0.3, 0.5, pos.depth, min(pos.depth + 0.1, 0.95)})
+    for drop in levels:
+        price = 1 - drop
+        s = pos.state(price)
+        pnl = s.value / pos.size - 1
+        y = pos.daily_fee_yield(price, p.fee_bps, p.vol_24h_usd, p.liquidity_usd)
+        cover = f"{-pnl / y:>6.1f}d" if y > 0 else "   out"
+        lines.append(f"  {-drop:>+5.0%}  {s.token_share:>7.0%}  {s.avg_entry - 1:>+8.0%}  "
+                     f"{pnl:>+7.1%}  {y:>7.2%}  {cover}")
+    return "\n".join(lines)
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
@@ -90,6 +108,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
               f"vol24 ${sum(s.pool.vol_24h_usd for s in hidden):,.0f} (--top {len(results)} to show)")
     total_liq = sum(s.pool.liquidity_usd for s in results)
     total_vol = sum(s.pool.vol_24h_usd for s in results)
+    if args.strategy:
+        # PnL позиции зависит только от текущей цены: откат = подъём по той же таблице
+        pos = RangePosition(args.size, args.depth, Shape(args.strategy))
+        for s in [s for s in results if s.pool.fee_bps > 0][:args.strategy_pools]:
+            print(_strategy_table(pos, s.pool))
     print(f"\ntotal: liq ${total_liq:,.0f}, vol24 ${total_vol:,.0f}, "
           f"top pool holds {results[0].pool.liquidity_usd / total_liq:.0%} of liquidity" if total_liq else "")
     return 0
@@ -108,6 +131,11 @@ def main(argv: list[str] | None = None) -> int:
     an.add_argument("--network", choices=[n.value for n in Network])
     an.add_argument("--min-liq", type=float, default=1_000, help="нижняя граница ликвидности пула, $")
     an.add_argument("--top", type=int, default=10, help="сколько пулов показать (по ликвидности)")
+    an.add_argument("--strategy", choices=[s.value for s in Shape],
+                    help="сценарии для позиции ниже цены: spot или bidask")
+    an.add_argument("--depth", type=float, default=0.7, help="глубина диапазона: 0.7 = до -70%%")
+    an.add_argument("--size", type=float, default=1000, help="размер позиции в $")
+    an.add_argument("--strategy-pools", type=int, default=2, help="для скольких крупнейших пулов")
     an.set_defaults(func=cmd_analyze)
 
     args = ap.parse_args(argv)
