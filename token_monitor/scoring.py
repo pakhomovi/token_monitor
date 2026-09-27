@@ -58,6 +58,10 @@ def classify_market(p: PoolSnapshot, cfg: Params = Params()) -> MarketResult:
     Метрики считаются всегда, даже для отсеянных пулов, чтобы при ручном анализе было видно,
     что именно отсекло пул.
     """
+    if p.fee_bps <= 0:
+        # v4-пулы лаунчпадов: комиссию забирает хук, LP не получает ничего
+        return MarketResult(Verdict.SKIP, ["no LP fee (hook pool)"])
+
     loss = stress_loss(cfg.stress_drop)
     y_24h = daily_yield(p.fee_bps, p.vol_24h_usd, p.liquidity_usd)
     y_now = daily_yield(p.fee_bps, p.vol_1h_usd * 24, p.liquidity_usd)

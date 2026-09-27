@@ -121,3 +121,8 @@ def test_low_liquidity_still_reports_metrics_and_would_be_verdict():
 def test_dead_pool_with_few_wallets_is_not_wash():
     r = classify_market(pool(vol_24h_usd=5, unique_wallets_24h=7))
     assert not r.reasons[0].startswith("wash")
+
+
+def test_zero_fee_hook_pool_is_skipped():
+    r = classify_market(pool(fee_bps=0, **ORGANIC))
+    assert r.verdict is Verdict.SKIP and r.reasons == ["no LP fee (hook pool)"]

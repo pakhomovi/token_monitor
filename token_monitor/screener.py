@@ -24,15 +24,16 @@ QUERY = """
 query Screen($filters: PairFilters, $rankings: [PairRanking], $limit: Int) {
   filterPairs(filters: $filters, rankings: $rankings, limit: $limit) {
     results {
-      pair { address networkId token0 token1 }
+      pair { address networkId token0 token1 fee }
       token0 { symbol }
       token1 { symbol }
-      exchange { name }
+      exchange { name address exchangeVersion }
       quoteToken
       liquidity
       volumeUSD1
       volumeUSD24
       poolFeeBps
+      dynamicFee
       txnCount24
       uniqueTransactions24
       swapPct1dOldWallet
@@ -100,6 +101,28 @@ def _int(v: Any) -> int | None:
     return int(n) if n is not None else None
 
 
+# v2-фабрики не отдают fee: комиссия зашита в контракт. Неизвестный форк не угадываем
+V2_FEE_BPS: dict[str, float] = {
+    "0xca143ce32fe78f1f7019d7d551a6402fc5350c73": 25,   # PancakeSwap v2 (BSC)
+    "0x8909dc15e40173ff4699343b6eb8132c65e18ec6": 30,   # Uniswap v2 (BSC, Base)
+}
+_V4_DYNAMIC_FEE_FLAG = 0x800000
+
+
+def resolve_fee_bps(row: dict[str, Any]) -> float | None:
+    """poolFeeBps → pair.fee (v3/v4, миллионные доли) → известная v2-фабрика."""
+    if (bps := _num(row.get("poolFeeBps"))) is not None:
+        return bps
+    exchange = row.get("exchange") or {}
+    raw = _num((row.get("pair") or {}).get("fee"))
+    if raw is not None:
+        # Динамическая комиссия v4: в pair.fee лежит флаг, а не ставка
+        if row.get("dynamicFee") or raw == _V4_DYNAMIC_FEE_FLAG:
+            return None
+        return raw / 100
+    return V2_FEE_BPS.get(str(exchange.get("address")).lower())
+
+
 def parse_pair(row: dict[str, Any], target: str | None = None) -> PoolSnapshot | None:
     """None для строк, по которым нельзя посчитать доходность (нет комиссии, чужая сеть и т.п.).
 
@@ -107,7 +130,7 @@ def parse_pair(row: dict[str, Any], target: str | None = None) -> PoolSnapshot |
     """
     pair = row.get("pair") or {}
     network = _NETWORK_BY_ID.get(pair.get("networkId"))
-    fee = _num(row.get("poolFeeBps"))
+    fee = resolve_fee_bps(row)
     liquidity = _num(row.get("liquidity"))
     if not (network and pair.get("address") and fee is not None and liquidity is not None):
         return None

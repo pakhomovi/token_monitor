@@ -178,3 +178,17 @@ def test_analyze_marks_unanalyzed_risk(monkeypatch, capsys):
     assert cli.main(["analyze", "0xTOKEN"]) == 0
     out = capsys.readouterr().out
     assert "not analyzed (NOT_ANALYZED)" in out and "NEUTRAL" not in out
+
+
+@pytest.mark.parametrize("override,expected", [
+    ({"poolFeeBps": 200, "pair": {**row()["pair"], "fee": 999}}, 200),           # poolFeeBps приоритетнее
+    ({"poolFeeBps": None, "pair": {**row()["pair"], "fee": 20000}}, 200),        # v3/v4: миллионные доли
+    ({"poolFeeBps": None, "pair": {**row()["pair"], "fee": 0}}, 0),              # v4 hook-пул
+    ({"poolFeeBps": None, "pair": {**row()["pair"], "fee": 0x800000}}, None),    # динамическая комиссия
+    ({"poolFeeBps": None, "dynamicFee": True, "pair": {**row()["pair"], "fee": 3000}}, None),
+    ({"poolFeeBps": None, "exchange": {"address": "0xCA143CE32FE78F1F7019D7D551A6402FC5350C73"}}, 25),
+    ({"poolFeeBps": None, "exchange": {"address": "0xunknownfork"}}, None),
+])
+def test_resolve_fee_bps(override, expected):
+    from token_monitor.screener import resolve_fee_bps
+    assert resolve_fee_bps(row(**override)) == expected

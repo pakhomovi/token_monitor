@@ -40,7 +40,13 @@ python -m token_monitor analyze 0x…      # все пулы токена + ри
 
 Screener берёт `CODEX_API_KEY`, `SCREEN_LIMIT` (≤ 200), `SCREEN_RANK_BY`,
 `SCREEN_MIN_VOLUME_24H`, `SCREEN_MIN_FEE_BPS`; порог ликвидности — общий `PARAM_MIN_LIQUIDITY`,
-фильтруется на стороне Codex. Пулы без `poolFeeBps` отбрасываются.
+фильтруется на стороне Codex.
+
+Комиссия пула: `poolFeeBps` → `pair.fee` (v3/v4, миллионные доли) → известная v2-фабрика.
+Пулы с динамической комиссией и неизвестные v2-форки отбрасываются. v4-пулы с `fee = 0`
+(лаунчпады, комиссию забирает хук) получают SKIP `no LP fee`.
+Серверный `SCREEN_MIN_FEE_BPS` работает по `poolFeeBps` и отсекает пулы, где он не заполнен;
+`analyze` этот фильтр не использует.
 
 ## Разработка
 
