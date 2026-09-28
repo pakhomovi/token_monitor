@@ -30,6 +30,7 @@ class Chain:
     v3_npm: str
     v4_posm: str
     v4_state_view: str
+    v4_pool_manager: str
 
 
 CHAINS: dict[Network, Chain] = {
@@ -37,17 +38,20 @@ CHAINS: dict[Network, Chain] = {
                         "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
                         "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
                         "0x7c5f5a4bbd8fd63184577525326123b519429bdc",
-                        "0xa3c0c9b65bad0b08107aa264b0f3db444b867a71"),
+                        "0xa3c0c9b65bad0b08107aa264b0f3db444b867a71",
+                        "0x498581ff718922c3f8e6a244956af099b2652b2b"),
     Network.ROBINHOOD: Chain("https://rpc.mainnet.chain.robinhood.com",
                              "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
                              "0x73991a25c818bf1f1128deaab1492d45638de0d3",
                              "0x58daec3116aae6d93017baaea7749052e8a04fa7",
-                             "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b"),
+                             "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b",
+                             "0x8366a39cc670b4001a1121b8f6a443a643e40951"),
     Network.BSC: Chain("https://bsc-dataseed.bnbchain.org",
                        "0xdB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7",
                        "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
                        "0x7a4a5c919ae2541aed11041a1aeee68f1287f95b",
-                       "0xd13dd3d6e93f276fafc9db9e6bb47c1180aee0c4"),
+                       "0xd13dd3d6e93f276fafc9db9e6bb47c1180aee0c4",
+                       "0x28e2ea090877bf75740558f6bfb36a5ffee9e9df"),
 }
 
 _URL_NETWORKS = {"base": Network.BASE, "robinhood": Network.ROBINHOOD, "bnb": Network.BSC, "bsc": Network.BSC}
@@ -130,6 +134,7 @@ def v4_unpack_info(info: int) -> tuple[int, int]:
 
 
 TRANSFER_TOPIC = keccak256(b"Transfer(address,address,uint256)")
+MODIFY_LIQUIDITY_TOPIC = keccak256(b"ModifyLiquidity(bytes32,address,int24,int24,int256,bytes32)")
 
 
 def v4_pool_id(currency0: str, currency1: str, fee: int, tick_spacing: int, hooks: str) -> bytes:
@@ -156,6 +161,22 @@ class Token:
 
 
 @dataclass(frozen=True, slots=True)
+class Collect:
+    block: int
+    amount0: int
+    amount1: int
+
+
+@dataclass(frozen=True, slots=True)
+class Earned:
+    """Комиссии за жизнь позиции: собранные + несобранные (сырые единицы)."""
+    collected0: int
+    collected1: int
+    collects: tuple[Collect, ...]   # отдельные клеймы с блоками (v4); у v3 — пусто, только сумма
+    exact: bool                     # False: ликвидность менялась или часть сумм в нативном ETH
+
+
+@dataclass(frozen=True, slots=True)
 class Position:
     network: Network
     version: int
@@ -172,6 +193,7 @@ class Position:
     pool_liquidity: int        # активная ликвидность пула у текущей цены
     fees0: int                 # несобранные комиссии, сырые единицы
     fees1: int
+    fee_growth_inside: tuple[int, int] = (0, 0)   # текущий feeGrowthInside0/1 (X128)
 
     @property
     def in_range(self) -> bool:
@@ -326,6 +348,62 @@ class ChainReader:
             to = frm - 1
         return None
 
+    def logs(self, address: str, topics: list, frm: int, to: int, window: int = 1_000_000,
+             min_window: int = 1_000) -> list[dict]:
+        """eth_getLogs по [frm, to] окнами; окно адаптивно сжимается под лимит узла (Base: 2000 блоков)."""
+        out: list[dict] = []
+        start = frm
+        while start <= to:
+            end = min(to, start + window - 1)
+            try:
+                out += self._rpc("eth_getLogs", [{"address": address, "fromBlock": hex(start), "toBlock": hex(end),
+                                                  "topics": topics}])
+            except RuntimeError as e:
+                limit = re.search(r"limited to a ([\d,]+) range", str(e))
+                if window <= min_window:
+                    raise
+                window = int(limit[1].replace(",", "")) if limit else window // 2
+                continue
+            start = end + 1
+        return out
+
+    def earned(self, pos: "Position", mint_block: int) -> Earned:
+        return self._earned_v3(pos, mint_block) if pos.version == 3 else self._earned_v4(pos, mint_block)
+
+    def _earned_v3(self, pos: "Position", mint_block: int) -> Earned:
+        """Заработано за жизнь = L·(feeGrowthInside сейчас − на минте); один архивный вызов вместо тысяч окон логов."""
+        at_mint = words(self._rpc("eth_call", [{"to": self.chain.v3_npm,
+                                                "data": calldata("positions(uint256)", pos.token_id)}, hex(mint_block)]))
+        total0 = unclaimed(pos.liquidity, pos.fee_growth_inside[0], at_mint[8])
+        total1 = unclaimed(pos.liquidity, pos.fee_growth_inside[1], at_mint[9])
+        return Earned(max(total0 - pos.fees0, 0), max(total1 - pos.fees1, 0), (), exact=at_mint[7] == pos.liquidity)
+
+    def _earned_v4(self, pos: "Position", mint_block: int) -> Earned:
+        """Клеймы v4 — ModifyLiquidity с liquidityDelta = 0; суммы — переводы от PoolManager в той же транзакции."""
+        pm = self.chain.v4_pool_manager
+        head = int(self._rpc("eth_blockNumber", []), 16)
+        topics = ["0x" + MODIFY_LIQUIDITY_TOPIC.hex(), pos.pool, "0x" + word(self.chain.v4_posm)]
+        exact, collects = True, []
+        tokens = {pos.token0.address.lower(): 0, pos.token1.address.lower(): 1}
+        for log in self.logs(pm, topics, mint_block + 1, head):
+            data = words(log["data"])              # tickLower, tickUpper, liquidityDelta, salt
+            if data[3] != pos.token_id:
+                continue
+            if signed(data[2], 256) != 0:          # изменение ликвидности тоже выплачивает комиссии — не разделить
+                exact = False
+                continue
+            receipt = self._rpc("eth_getTransactionReceipt", [log["transactionHash"]])
+            amounts_ = [0, 0]
+            for rl in receipt["logs"]:
+                t = rl["topics"]
+                if t[0] == "0x" + TRANSFER_TOPIC.hex() and len(t) == 3 and address(int(t[1], 16)) == pm.lower() \
+                        and (i := tokens.get(rl["address"].lower())) is not None:
+                    amounts_[i] += int(rl["data"], 16)
+            if NATIVE in tokens:                   # нативный ETH не оставляет Transfer-событий
+                exact = False
+            collects.append(Collect(int(log["blockNumber"], 16), *amounts_))
+        return Earned(sum(c.amount0 for c in collects), sum(c.amount1 for c in collects), tuple(collects), exact)
+
     def position(self, version: int, token_id: int) -> Position:
         return self._v3(token_id) if version == 3 else self._v4(token_id)
 
@@ -350,7 +428,7 @@ class ChainReader:
         tok0, tok1 = self.tokens([t0, t1])
         return Position(self.network, 3, token_id, pool, tok0, tok1, fee / 100, lower, upper, tick,
                         s[0] / Q96, liq, words(pool_liq)[0],
-                        w[10] + unclaimed(liq, in0, w[8]), w[11] + unclaimed(liq, in1, w[9]))
+                        w[10] + unclaimed(liq, in0, w[8]), w[11] + unclaimed(liq, in1, w[9]), (in0, in1))
 
     def _v4(self, token_id: int) -> Position:
         c = self.chain
@@ -375,4 +453,4 @@ class ChainReader:
         tok0, tok1 = self.tokens([c0, c1])
         return Position(self.network, 4, token_id, "0x" + pid.hex(), tok0, tok1, lp_fee / 100, lower, upper,
                         signed(s[1], 24), s[0] / Q96, liq, words(pool_liq)[0],
-                        unclaimed(liq, g[0], l[1]), unclaimed(liq, g[1], l[2]))
+                        unclaimed(liq, g[0], l[1]), unclaimed(liq, g[1], l[2]), (g[0], g[1]))

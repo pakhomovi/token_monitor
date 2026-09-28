@@ -65,3 +65,11 @@ def test_usd_volume_scales_with_price():
     # Одинаковая доля в пуле на разных ценах → комиссии пропорциональны цене
     p = RangePosition(1000, 0.7, bins=1)
     assert isclose(p.daily_fee_yield(0.5, 200, 1e5, 1e5) / p.daily_fee_yield(1.0, 200, 1e5, 1e5), 0.5)
+
+
+def test_spot_is_uniform_liquidity_like_single_uniswap_position():
+    # Реальная позиция HADES: диапазон -64%, цена -35.2% от верха → PnL -9.5% (с блокчейна)
+    multi, single = RangePosition(400, 0.64, Shape.SPOT), RangePosition(400, 0.64, Shape.SPOT, bins=1)
+    assert len({round(b.liquidity, 6) for b in multi.bins}) == 1
+    assert isclose(multi.state(0.648).value, single.state(0.648).value, rel_tol=1e-9)
+    assert isclose(single.state(0.648).value / 400 - 1, -0.095, abs_tol=0.001)

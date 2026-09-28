@@ -71,6 +71,10 @@ class PositionView:
     def fees(self) -> tuple[float, float]:
         return self._split(*self.pos.fees)
 
+    def split_raw(self, amount0: int, amount1: int) -> tuple[float, float]:
+        """Сырые суммы token0/token1 → (целевой токен, quote) с учётом decimals."""
+        return self._split(amount0 / 10 ** self.pos.token0.decimals, amount1 / 10 ** self.pos.token1.decimals)
+
     @property
     def value(self) -> float:
         """Стоимость позиции в quote без комиссий."""

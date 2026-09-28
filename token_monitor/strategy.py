@@ -10,7 +10,7 @@ from math import sqrt
 
 
 class Shape(str, Enum):
-    SPOT = "spot"        # равный капитал в каждом бине
+    SPOT = "spot"        # равномерная ликвидность, как одна позиция Uniswap
     BIDASK = "bidask"    # капитал линейно растёт к нижней границе
 
 
@@ -36,14 +36,14 @@ class RangePosition:
         self.bottom = 1 - depth
         ratio = self.bottom ** (1 / bins)
         # Бин 0 — сразу под ценой входа, последний — у нижней границы
-        weights = [1.0] * bins if shape is Shape.SPOT else [float(i + 1) for i in range(bins)]
+        edges = [(ratio ** (i + 1), ratio ** i) for i in range(bins)]
+        # spot = одна позиция Uniswap: ликвидность L одинакова по диапазону, капитал бина ∝ √pb − √pa.
+        # bidask: капитал линейно растёт к нижней границе
+        weights = ([sqrt(pb) - sqrt(pa) for pa, pb in edges] if shape is Shape.SPOT
+                   else [float(i + 1) for i in range(bins)])
         total = sum(weights)
-        self.bins: list[Bin] = []
-        pb = 1.0
-        for w in weights:
-            pa = pb * ratio
-            self.bins.append(Bin(pa, pb, size * w / total / (sqrt(pb) - sqrt(pa))))
-            pb = pa
+        self.bins: list[Bin] = [Bin(pa, pb, size * w / total / (sqrt(pb) - sqrt(pa)))
+                                for (pa, pb), w in zip(edges, weights)]
 
     def state(self, p: float) -> State:
         token = quote = 0.0
