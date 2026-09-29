@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 
 import httpx
 
+from .active import with_active_liquidity
 from .config import Settings, load_settings
 from .dexscreener import PairStats, pair_stats
 from .models import Network, PoolSnapshot
@@ -25,8 +26,9 @@ def _row(s: Scored) -> str:
     p, m = s.pool, s.market.metrics
     covers = (f"cover ¼ {_days(m['cover_25'])} ½ {_days(m['cover_50'])} bottom {_days(m['cover_100'])}  "
               if "cover_25" in m else "")
+    eff = f" (eff ${p.effective_tvl_usd:,.0f})" if p.effective_tvl_usd is not None else ""
     return (f"{s.market.verdict.value.upper():<5} {p.network.value:<9} {p.symbol[:12]:<12} "
-            f"{p.exchange[:16]:<16} fee {p.fee_bps:>5.1f}bp  liq ${p.liquidity_usd:>12,.0f}  "
+            f"{p.exchange[:16]:<16} fee {p.fee_bps:>5.1f}bp  liq ${p.liquidity_usd:>12,.0f}{eff}  "
             f"vol24 ${p.vol_24h_usd:>13,.0f}  pers {m.get('persistence', 0):>5.2f}  {covers}"
             f"{'; '.join(s.market.reasons)}  {p.address}")
 
@@ -51,6 +53,8 @@ def cmd_screen(args: argparse.Namespace) -> int:
     try:
         with CodexScreener(st.codex_api_key or "") as screener:
             pools = screener.fetch(query)
+            if not args.no_onchain:
+                pools = with_active_liquidity(pools, screener)
     except CodexError as e:
         print(f"codex: {e}", file=sys.stderr)
         return 1
@@ -72,7 +76,7 @@ def _strategy_table(pos: RangePosition, p: PoolSnapshot) -> str:
         price = 1 - drop
         s = pos.state(price)
         pnl = s.value / pos.size - 1
-        y = pos.daily_fee_yield(price, p.fee_bps, p.vol_24h_usd, p.liquidity_usd)
+        y = pos.daily_fee_yield(price, p.fee_bps, p.vol_24h_usd, p.fee_tvl_usd)
         cover = _days(-pnl / y) if y > 0 else "  out"
         lines.append(f"  {name:<10} {-drop:>+6.0%}  {s.token_share:>7.0%}  {s.avg_entry - 1:>+8.0%}  "
                      f"{pnl:>+7.1%}  {y:>7.2%}  {cover}")
@@ -93,11 +97,14 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     try:
         with CodexScreener(st.codex_api_key or "") as screener:
             rows = screener.fetch_rows(query)
+            parsed = [(r, p) for r in rows if (p := parse_pair(r, target=token)) and p.token == token]
+            if not args.no_onchain:
+                enriched = with_active_liquidity([p for _, p in parsed], screener)
+                parsed = [(r, p) for (r, _), p in zip(parsed, enriched)]
     except CodexError as e:
         print(f"codex: {e}", file=sys.stderr)
         return 1
 
-    parsed = [(r, p) for r in rows if (p := parse_pair(r, target=token)) and p.token == token]
     if not parsed:
         print(f"no pools for {token} with liquidity >= ${args.min_liq:,.0f}", file=sys.stderr)
         return 1
@@ -283,6 +290,8 @@ def main(argv: list[str] | None = None) -> int:
                        help="модель входа (override PARAM_STRATEGY)")
     strat.add_argument("--depth", type=float, help="глубина диапазона: 0.7 = до -70%%")
     strat.add_argument("--size", type=float, help="размер позиции, $")
+    strat.add_argument("--no-onchain", action="store_true",
+                       help="не читать активную ликвидность с блокчейна (оценка по TVL, завышает комиссии)")
     sc = sub.add_parser("screen", parents=[strat], help="top-N пулов из Codex → FAST/SLOW")
     sc.add_argument("--limit", type=int, help="override SCREEN_LIMIT")
     sc.add_argument("--all", action="store_true", help="показывать и SKIP")

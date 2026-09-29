@@ -6,6 +6,7 @@ import pytest
 
 from token_monitor.models import Network
 from token_monitor.onchain import (ChainReader, Position, RateLimited, Token, amounts, calldata, decode_string,
+                                   effective_tvl,
                                    parse_position_url, selector, signed, unclaimed, v3_fee_growth_inside,
                                    v4_pool_id, v4_unpack_info, word, words)
 from token_monitor.positions import PositionView
@@ -185,3 +186,17 @@ def test_quote_reference():
     assert quote_reference("ETH") == quote_reference("WETH")     # нативный ETH — по эталонному WETH
     assert quote_reference("WBNB")[1] is Network.BSC
     assert quote_reference("PEPE") is None
+
+
+def test_effective_tvl_matches_full_range_position_value():
+    # Full-range позиция: стоимость в token1 = 2L√P. Quote = token1, $1 за единицу, 6 decimals
+    L, sp = 10**12, 1.0001 ** 100
+    assert isclose(effective_tvl(sp, L, True, 6, 1.0), 2 * L * sp / 1e6)
+    assert isclose(effective_tvl(sp, L, False, 18, 2000.0), 2 * L / sp / 1e18 * 2000)
+
+
+def test_effective_tvl_consistent_with_position_share():
+    # Доля позиции в пуле = отношение их эффективных TVL (реальные данные позиции Basecat)
+    sp = 1.0001 ** (120228 / 2)
+    pos, pool = 3 * 10**20, 7 * 10**22
+    assert isclose(effective_tvl(sp, pos, False, 18, 1) / effective_tvl(sp, pool, False, 18, 1), pos / pool)

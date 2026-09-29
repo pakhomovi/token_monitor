@@ -33,6 +33,17 @@ class PoolSnapshot:
     txns_24h: int | None = None
     unique_wallets_24h: int | None = None
     fresh_wallet_share: float | None = None   # доля свопов с кошельков моложе суток
+    # Для чтения активной ликвидности с блокчейна
+    target_is_token0: bool | None = None
+    quote_symbol: str = ""
+    quote_decimals: int | None = None
+    # TVL full-range пула с той же ликвидностью у текущей цены; None — не читали, берём TVL
+    effective_tvl_usd: float | None = None
+
+    @property
+    def fee_tvl_usd(self) -> float:
+        """Знаменатель доли в комиссиях: эффективный TVL, если известен."""
+        return self.effective_tvl_usd if self.effective_tvl_usd is not None else self.liquidity_usd
 
 
 @dataclass(frozen=True, slots=True)

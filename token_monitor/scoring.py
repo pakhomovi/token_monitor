@@ -104,7 +104,7 @@ class RangeStress:
     def cover_days(self, p: PoolSnapshot, daily_volume: float, fraction: float) -> float:
         price = 1 - self.pos.depth * fraction
         loss = 1 - self.pos.state(price).value / self.pos.size
-        y = self.pos.daily_fee_yield(price, p.fee_bps, daily_volume, p.liquidity_usd)
+        y = self.pos.daily_fee_yield(price, p.fee_bps, daily_volume, p.fee_tvl_usd)
         return loss / y if y > 0 else inf
 
     def breakeven(self, p: PoolSnapshot, daily_volume: float) -> tuple[float, dict[str, float]]:

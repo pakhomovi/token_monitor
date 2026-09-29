@@ -454,3 +454,28 @@ class ChainReader:
         return Position(self.network, 4, token_id, "0x" + pid.hex(), tok0, tok1, lp_fee / 100, lower, upper,
                         signed(s[1], 24), s[0] / Q96, liq, words(pool_liq)[0],
                         unclaimed(liq, g[0], l[1]), unclaimed(liq, g[1], l[2]), (g[0], g[1]))
+
+
+def effective_tvl(sqrt_price: float, liquidity: int, quote_is_token1: bool, quote_decimals: int,
+                  quote_usd: float) -> float:
+    """TVL full-range пула с той же активной ликвидностью L у текущей цены, в $.
+
+    Full-range: amount1 = L·√P, amount0 = L/√P, стоимость в token1 = 2L√P, в token0 = 2L/√P.
+    """
+    raw = 2 * liquidity * (sqrt_price if quote_is_token1 else 1 / sqrt_price)
+    return raw / 10 ** quote_decimals * quote_usd
+
+
+def _pool_state_calls(chain: Chain, version: int, pool: str) -> list[tuple[str, str]]:
+    if version == 4:
+        pid = bytes.fromhex(pool.removeprefix("0x"))
+        return [(chain.v4_state_view, calldata("getSlot0(bytes32)", pid)),
+                (chain.v4_state_view, calldata("getLiquidity(bytes32)", pid))]
+    return [(pool, calldata("slot0()")), (pool, calldata("liquidity()"))]
+
+
+def pool_states(reader: "ChainReader", pools: Sequence[tuple[int, str]]) -> list[tuple[float, int]]:
+    """(√цены в сырых единицах, активная L) для пулов (версия, адрес v3 | poolId v4) — одним батчем."""
+    calls = [c for v, pool in pools for c in _pool_state_calls(reader.chain, v, pool)]
+    res = reader.batch(calls)
+    return [(words(res[2 * i])[0] / Q96, words(res[2 * i + 1])[0]) for i in range(len(pools))]

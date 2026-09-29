@@ -23,8 +23,8 @@ RANK_ATTRIBUTES = frozenset({"volumeUSD1", "volumeUSD4", "volumeUSD12", "volumeU
 
 _RESULT_FIELDS = """
       pair { address networkId token0 token1 fee protocol }
-      token0 { symbol }
-      token1 { symbol }
+      token0 { symbol decimals }
+      token1 { symbol decimals }
       exchange { name address exchangeVersion }
       quoteToken
       liquidity
@@ -188,6 +188,7 @@ def parse_pair(row: dict[str, Any], target: str | None = None) -> PoolSnapshot |
     else:
         # Целевой токен — не quote-сторона пары
         side = "token0" if row.get("quoteToken") == "token1" else "token1"
+    quote = "token1" if side == "token0" else "token0"
     return PoolSnapshot(
         address=pair["address"].lower(),
         token=pair[side].lower(),
@@ -203,6 +204,9 @@ def parse_pair(row: dict[str, Any], target: str | None = None) -> PoolSnapshot |
         txns_24h=_int(row.get("txnCount24")),
         unique_wallets_24h=_int(row.get("uniqueTransactions24")),
         fresh_wallet_share=_num(row.get("swapPct1dOldWallet")),
+        target_is_token0=side == "token0",
+        quote_symbol=(row.get(quote) or {}).get("symbol") or "",
+        quote_decimals=_int((row.get(quote) or {}).get("decimals")),
     )
 
 
