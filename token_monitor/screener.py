@@ -260,6 +260,25 @@ class CodexScreener:
                               "variables": {"pairs": [f"{a}:{NETWORK_IDS[n]}" for a, n in pools], "limit": len(pools)}})
         return [r for r in (data.get("filterPairs") or {}).get("results") or [] if r]
 
+    def token_stats(self, tokens: list[tuple[str, Network]]) -> list[dict[str, Any]]:
+        """Метрики токенов одним запросом: адрес, сеть, символ, создание, капитализация, холдеры, лаунчпад."""
+        if not tokens:
+            return []
+        q = """query($t:[String], $n:Int){filterTokens(tokens:$t, limit:$n){results{
+            createdAt marketCap holders token{ address symbol networkId launchpad{ migrated } } }}}"""
+        out: list[dict[str, Any]] = []
+        for i in range(0, len(tokens), 200):
+            chunk = tokens[i:i + 200]
+            data = self._request({"query": q, "variables": {"t": [f"{a}:{NETWORK_IDS[n]}" for a, n in chunk],
+                                                            "n": len(chunk)}})
+            for r in (data.get("filterTokens") or {}).get("results") or []:
+                t = r.get("token") or {}
+                out.append({"address": t.get("address", "").lower(), "symbol": t.get("symbol") or "",
+                            "network": _NETWORK_BY_ID.get(t.get("networkId")), "created_at": r.get("createdAt"),
+                            "marketCap": r.get("marketCap"), "holders": r.get("holders"),
+                            "migrated": (t.get("launchpad") or {}).get("migrated")})
+        return out
+
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
         for attempt in range(self._max_retries + 1):
             last = attempt == self._max_retries

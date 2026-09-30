@@ -8,6 +8,7 @@ import httpx
 
 from .active import with_active_liquidity
 from .config import Settings, load_settings
+from .dev import dev_report, enrich_launches
 from .dexscreener import PairStats, pair_stats
 from .models import Network, PoolSnapshot
 from .onchain import ChainReader, Earned, parse_position_url
@@ -283,6 +284,60 @@ def cmd_position(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dev(args: argparse.Namespace) -> int:
+    st = load_settings()
+    token = args.token.lower()
+    networks = (Network(args.network),) if args.network else st.networks
+    try:
+        with CodexScreener(st.codex_api_key or "") as codex:
+            found = [t for t in codex.token_stats([(token, n) for n in networks]) if t["address"] == token]
+            if not found or not found[0]["created_at"]:
+                print(f"{token}: токен не найден в Codex ({', '.join(n.value for n in networks)})", file=sys.stderr)
+                return 1
+            info = found[0]
+            network: Network = info["network"]
+            with ChainReader(network) as reader:
+                head = int(reader._rpc("eth_blockNumber", []), 16)
+                span = head - 100_000
+                bps = 100_000 / max(reader.block_timestamp(head) - reader.block_timestamp(span), 1)
+                report = dev_report(reader, token, info["created_at"],
+                                    launches_lookback_blocks=int(args.days * 86400 * bps),
+                                    outflow_blocks=int(args.days * 86400 * bps))
+            if report.launches:
+                report = enrich_launches(report, codex.token_stats([(t.address, network) for t in report.launches]))
+    except (CodexError, RuntimeError) as e:
+        hint = (" — этот RPC не отдаёт логи; задайте другой через RPC_<СЕТЬ> "
+                "(например RPC_BSC=https://bsc-rpc.publicnode.com)" if "limit exceeded" in str(e) else "")
+        print(f"dev: {e}{hint}", file=sys.stderr)
+        return 1
+
+    c = report.creation
+    print(f"{info['symbol']} {token} ({network.value})")
+    print(f"  запускатор  {c.launcher}" + (f" через {c.factory} (лаунчпад)" if c.factory else " (прямой деплой)"))
+    print(f"  создание    tx {c.tx_hash}, блок {c.block}")
+    print(f"  на старте   купил {report.bought_share:.2%} предложения, держит сейчас {report.holds_share:.2%}")
+    if report.outflows:
+        pools = sum(o.amount for o in report.outflows if o.is_contract) / report.total_supply
+        print(f"  вывел       в контракты (пулы/роутеры) {pools:.2%}, на кошельки {report.to_wallets_share:.2%}"
+              f" ({sum(not o.is_contract for o in report.outflows)} адресов)")
+        for o in [o for o in report.outflows if not o.is_contract][:5]:
+            print(f"              → {o.to} {o.amount / report.total_supply:.2%}")
+    if report.launches:
+        alive = [t for t in report.launches if t.alive]
+        migrated = sum(bool(t.migrated) for t in report.launches)
+        print(f"  запуски     {len(report.launches)} за {args.days:g} дн.: мигрировали {migrated}, "
+              f"живых (mcap ≥ $50k) {len(alive)}")
+        for t in sorted(report.launches, key=lambda t: -t.market_cap)[:args.top]:
+            print(f"              {t.symbol[:14]:14} mcap ${t.market_cap:>12,.0f}  holders {t.holders:>6}  {t.address}")
+    elif c.launch_event:
+        print(f"  запуски     других запусков за {args.days:g} дн. не найдено")
+    else:
+        print("  запуски     событие лаунчпада не найдено — историю запусков смотреть в эксплорере")
+    flags = report.flags()
+    print("  флаги       " + ("; ".join(flags) if flags else "нет"))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="token_monitor")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -311,6 +366,13 @@ def main(argv: list[str] | None = None) -> int:
     po.add_argument("urls", nargs="+")
     po.add_argument("--no-entry", action="store_true", help="без истории: даты входа и собранных комиссий (быстрее)")
     po.set_defaults(func=cmd_position)
+
+    dv = sub.add_parser("dev", help="проверка дева: запускатор, покупка на старте, продажи, другие запуски")
+    dv.add_argument("token", help="адрес токена")
+    dv.add_argument("--network", choices=[n.value for n in Network])
+    dv.add_argument("--days", type=float, default=7, help="глубина поиска других запусков и выводов, дней")
+    dv.add_argument("--top", type=int, default=10, help="сколько запусков показать")
+    dv.set_defaults(func=cmd_dev)
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
