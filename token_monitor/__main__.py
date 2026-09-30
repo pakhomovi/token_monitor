@@ -200,8 +200,10 @@ def _position_report(v: PositionView, c: PositionContext) -> str:
                      + ("" if c.earned.exact else " — неточно: менялась ликвидность или нативный ETH"))
         fees_total += collected_q
     if entry:
+        # Считаем в quote (ETH/BNB): колебания quote не смазывают результат стратегии; в $ — по текущему курсу
         lines.append(f"  итог      комиссии {fees_total / entry:+.1%} + PnL {v.pnl_from_top:+.1%} = "
-                     f"{(v.value + fees_total) / entry - 1:+.1%} ({money(v.value + fees_total - entry)})")
+                     f"{(v.value + fees_total) / entry - 1:+.1%} ({money(v.value + fees_total - entry)})"
+                     + (f" — vs HODL в {q.symbol}, $ по текущему курсу" if not is_stable(q.symbol) else ""))
     if c.minted:
         days = (time.time() - c.minted) / 86400
         line = f"  вход      {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(c.minted))} ({days * 24:.0f}ч назад)"
