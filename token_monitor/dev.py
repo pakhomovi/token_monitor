@@ -10,6 +10,7 @@ from typing import Sequence
 from .onchain import TRANSFER_TOPIC, ChainReader, address, calldata, word, words
 
 ZERO_TOPIC = "0x" + word(0)
+BURN_ADDRESSES = frozenset({"0x" + "0" * 40, "0x000000000000000000000000000000000000dead"})
 T_TOPIC = "0x" + TRANSFER_TOPIC.hex()
 
 
@@ -29,6 +30,15 @@ class Outflow:
     to: str
     amount: int
     is_contract: bool
+
+    @property
+    def is_burn(self) -> bool:
+        return self.to.lower() in BURN_ADDRESSES
+
+    @property
+    def to_wallet(self) -> bool:
+        """Перевод на обычный кошелёк (не контракт и не сжигание) — возможная скрытая доля."""
+        return not self.is_contract and not self.is_burn
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +74,11 @@ class DevReport:
     @property
     def to_wallets_share(self) -> float:
         """Доля предложения, переведённая дево на обычные кошельки: способ спрятать долю."""
-        return sum(o.amount for o in self.outflows if not o.is_contract) / self.total_supply if self.total_supply else 0.0
+        return sum(o.amount for o in self.outflows if o.to_wallet) / self.total_supply if self.total_supply else 0.0
+
+    @property
+    def burned_share(self) -> float:
+        return sum(o.amount for o in self.outflows if o.is_burn) / self.total_supply if self.total_supply else 0.0
 
     def flags(self) -> list[str]:
         out = []
@@ -107,9 +121,15 @@ def block_at(reader: ChainReader, ts: int) -> int:
     return lo
 
 
-def find_creation(reader: ChainReader, token: str, created_ts: int, window: int = 5_000) -> CreationTx:
+def find_creation(reader: ChainReader, token: str, created_ts: int,
+                  windows: Sequence[int] = (5_000, 100_000, 2_000_000)) -> CreationTx:
+    """createdAt индексатора может расходиться с минтом (старые токены, реиндексация): окно расширяется."""
     around = block_at(reader, created_ts)
-    logs = reader.logs(token, [T_TOPIC, ZERO_TOPIC], max(0, around - window), around + window)
+    logs: list = []
+    for window in windows:
+        logs = reader.logs(token, [T_TOPIC, ZERO_TOPIC], max(0, around - window), around + window)
+        if logs:
+            break
     if not logs:
         raise RuntimeError("mint transfer not found near creation time")
     first = min(logs, key=lambda lg: (int(lg["blockNumber"], 16), int(lg.get("logIndex", "0x0"), 16)))

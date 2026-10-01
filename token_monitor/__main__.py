@@ -319,8 +319,9 @@ def cmd_dev(args: argparse.Namespace) -> int:
     if report.outflows:
         pools = sum(o.amount for o in report.outflows if o.is_contract) / report.total_supply
         print(f"  вывел       в контракты (пулы/роутеры) {pools:.2%}, на кошельки {report.to_wallets_share:.2%}"
-              f" ({sum(not o.is_contract for o in report.outflows)} адресов)")
-        for o in [o for o in report.outflows if not o.is_contract][:5]:
+              f" ({sum(o.to_wallet for o in report.outflows)} адресов)"
+              + (f", сжёг {report.burned_share:.2%}" if report.burned_share else ""))
+        for o in [o for o in report.outflows if o.to_wallet][:5]:
             print(f"              → {o.to} {o.amount / report.total_supply:.2%}")
     if report.launches:
         alive = [t for t in report.launches if t.alive]

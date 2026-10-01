@@ -95,3 +95,24 @@ def test_dev_report_end_to_end():
     assert [x.address for x in r.launches] == [TOKEN, "0x" + "b" * 40]
     # Поиск запусков — по событию лаунчпада с адресом дева на нужной позиции
     assert (FACTORY, [LAUNCH_TOPIC, t(DEV), None]) in reader.calls
+
+
+def test_find_creation_widens_window():
+    from token_monitor.dev import find_creation
+
+    class Far(FakeReader):
+        def logs(self, address, topics, frm, to):
+            self.calls.append((frm, to))
+            # минт далеко от createdAt: находится только во втором окне
+            return [{"blockNumber": hex(100), "logIndex": "0x0", "transactionHash": "0xabc"}] if to - frm > 10_000 else []
+
+    r = Far()
+    assert find_creation(r, TOKEN, created_ts=500).launcher == DEV
+    assert len(r.calls) == 2
+
+
+def test_burn_is_not_hidden_supply():
+    burn = Outflow("0x000000000000000000000000000000000000dEaD", SUPPLY // 10, False)
+    r = report(outflows=(burn,))
+    assert r.burned_share == 0.1 and r.to_wallets_share == 0
+    assert not any("other wallets" in f for f in r.flags())
